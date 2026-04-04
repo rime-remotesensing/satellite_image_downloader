@@ -1,0 +1,45 @@
+# Core inputs
+# Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
+# (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
+geojson: ./config/area.geojson
+startday: "20240101"
+endday: "20240131"
+
+# Select one or multiple: sentinel2, landsat89, modis, viirs
+satellite:
+  - sentinel2
+  - landsat89
+  - modis
+  - viirs
+
+# Output root directory
+output: ./output
+
+# Band selection
+# band: all
+# band: at
+# num: [1, 2, 3]
+band: all
+num: []
+
+# Cloud classes to mask: 1=thick cloud, 2=thin cloud, 3=shadow
+cloudmask: [1, 3]
+
+# Optional STAC filter
+max_cloud_cover: 80
+
+# Cloud mask inference options
+omnicloudmask:
+  batch_size: 1
+  patch_size: 1000
+  patch_overlap: 300
+  device: cuda
+
+# FIRMS API settings
+firms:
+  api_key: ""
+  base_url: "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+  days: 31
+  product_map:
+    modis: MODIS_NRT
+    viirs: VIIRS_SNPP_NRT

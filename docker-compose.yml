@@ -1,0 +1,16 @@
+services:
+  downloader:
+    build:
+      context: .
+      dockerfile: env/Dockerfile
+    image: satellite-downloader:latest
+    container_name: satellite-downloader
+    gpus: all
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+      - ${SATDL_HOST_DATA_PATH:-./data}:/host_data
+    command: ["python3", "run.py", "--config", "config/config.yaml"]
+    stdin_open: true
+    tty: true
+    shm_size: "8gb"
