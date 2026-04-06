@@ -36,6 +36,7 @@ except ImportError as exc:  # pragma: no cover
 
 
 LOGGER = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
@@ -76,6 +77,11 @@ CLOUDMASK_REQUIRED_BANDS = {
     "landsat89": [3, 4, 5],
 }
 
+SNOWMASK_REQUIRED_BANDS = {
+    "sentinel2": [3, 4, 11],
+    "landsat89": [3, 4, 6],
+}
+
 TARGET_RESOLUTION = {
     "sentinel2": 10.0,
     "landsat89": 30.0,
@@ -112,6 +118,7 @@ def _apply_cloud_mask_local(
     output_path: Path,
     mask_classes: List[int],
     satellite_type: str,
+    snow_mask_path: Optional[Path] = None,
 ) -> Path:
     if satellite_type not in DN_CONVERSION_PRESETS:
         raise ValueError(f"Unsupported satellite type for reflectance conversion: {satellite_type}")
@@ -131,10 +138,21 @@ def _apply_cloud_mask_local(
             f"Mask shape mismatch. image={raw_data.shape[1:]}, mask={cloud_mask.shape}"
         )
 
+    snow_mask = None
+    if snow_mask_path is not None:
+        with rasterio.open(snow_mask_path) as ssrc:
+            snow_mask = ssrc.read(1)
+        if snow_mask.shape != raw_data.shape[1:]:
+            raise ValueError(
+                f"Snow mask shape mismatch. image={raw_data.shape[1:]}, snow={snow_mask.shape}"
+            )
+
     data = raw_data * preset["scale"] + preset["offset"]
     data = np.clip(data, 0.0, 1.0)
 
     mask_target = np.isin(cloud_mask, mask_classes)
+    if snow_mask is not None:
+        mask_target = mask_target | (snow_mask == 1)
     for band_idx in range(data.shape[0]):
         data[band_idx][mask_target] = np.nan
 
@@ -161,10 +179,94 @@ def _apply_cloud_mask_local(
     return output_path
 
 
+def _create_ndsi_snow_mask_local(
+    image_path: Path,
+    output_path: Path,
+    satellite_key: str,
+    download_band_numbers: List[int],
+    ndsi_threshold: float = 0.4,
+    red_threshold: float = 0.2,
+) -> Path:
+    required = SNOWMASK_REQUIRED_BANDS[satellite_key]
+    missing = [b for b in required if b not in download_band_numbers]
+    if missing:
+        raise ValueError(
+            f"Snow mask requires bands {required} for {satellite_key}, missing={missing}"
+        )
+
+    green_idx = download_band_numbers.index(required[0]) + 1
+    red_idx = download_band_numbers.index(required[1]) + 1
+    swir_idx = download_band_numbers.index(required[2]) + 1
+
+    with rasterio.open(image_path) as src:
+        green = src.read(green_idx).astype(np.float32)
+        red = src.read(red_idx).astype(np.float32)
+        swir = src.read(swir_idx).astype(np.float32)
+        meta = src.meta.copy()
+
+    if satellite_key == "sentinel2":
+        green_ref = green / 10000.0
+        red_ref = red / 10000.0
+        swir_ref = swir / 10000.0
+    else:
+        green_ref = np.clip(green * 0.0000275 - 0.2, 0.0, 1.0)
+        red_ref = np.clip(red * 0.0000275 - 0.2, 0.0, 1.0)
+        swir_ref = np.clip(swir * 0.0000275 - 0.2, 0.0, 1.0)
+
+    denom = green_ref + swir_ref
+    ndsi = np.where(denom != 0, (green_ref - swir_ref) / denom, np.nan)
+
+    snow_condition = (ndsi > ndsi_threshold) & (red_ref > red_threshold)
+    snow_mask = np.where(snow_condition, 1, 0).astype(np.uint8)
+    snow_mask[np.isnan(ndsi)] = 255
+
+    meta.update({
+        "count": 1,
+        "dtype": "uint8",
+        "nodata": 255,
+        "compress": "lzw",
+    })
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(output_path, "w", **meta) as dst:
+        dst.write(snow_mask, 1)
+
+    return output_path
+
+
 def _load_config(config_path: Path) -> Dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as f:
         loaded = yaml.safe_load(f)
     return loaded or {}
+
+
+def _resolve_runtime_path(
+    path_value: str,
+    config_dir: Path,
+    *,
+    must_exist: bool = False,
+) -> Path:
+    """Resolve runtime path with project-root first fallback.
+
+    Relative paths are interpreted from PROJECT_ROOT first, then config_dir.
+    This allows values like "./config/no5.geojson" in config/config.yaml
+    without accidentally resolving to config/config/no5.geojson.
+    """
+    p = Path(str(path_value))
+    if p.is_absolute():
+        return p
+
+    candidates = [
+        (PROJECT_ROOT / p).resolve(),
+        (config_dir / p).resolve(),
+    ]
+
+    if must_exist:
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+    return candidates[0]
 
 
 def _to_date(value: str) -> date:
@@ -216,7 +318,12 @@ def _bbox_from_geometry(geometry: Dict[str, Any]) -> Tuple[float, float, float, 
     return float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])
 
 
-def _resolve_band_request(config: Dict[str, Any], satellite_key: str) -> Tuple[List[int], List[int]]:
+def _resolve_band_request(
+    config: Dict[str, Any],
+    satellite_key: str,
+    *,
+    snowmask_enabled: bool = False,
+) -> Tuple[List[int], List[int]]:
     if satellite_key == "sentinel2":
         max_band = max(SENTINEL_BAND_MAP.keys())
     else:
@@ -244,7 +351,10 @@ def _resolve_band_request(config: Dict[str, Any], satellite_key: str) -> Tuple[L
         raise ValueError(f"Invalid band numbers for {satellite_key}: {invalid}")
 
     required = CLOUDMASK_REQUIRED_BANDS[satellite_key]
-    downloaded = sorted(set(requested + required))
+    downloaded_set = set(requested + required)
+    if snowmask_enabled:
+        downloaded_set.update(SNOWMASK_REQUIRED_BANDS[satellite_key])
+    downloaded = sorted(downloaded_set)
     return downloaded, requested
 
 
@@ -477,6 +587,8 @@ def _reproject_to_reference(
     src_arr: np.ndarray,
     src_profile: Dict[str, Any],
     ref_profile: Dict[str, Any],
+    *,
+    resampling_method: Resampling = Resampling.bilinear,
 ) -> np.ndarray:
     if (
         src_profile["crs"] == ref_profile["crs"]
@@ -500,7 +612,7 @@ def _reproject_to_reference(
             dst_crs=ref_profile["crs"],
             src_nodata=sentinel_nodata,
             dst_nodata=np.nan,
-            resampling=Resampling.bilinear,
+            resampling=resampling_method,
         )
 
     return dst
@@ -528,6 +640,42 @@ def _composite_masked_stacks(masked_stack_paths: List[Path]) -> Tuple[np.ndarray
     })
 
     return composite.astype(np.float32), out_profile
+
+
+def _composite_stacks(
+    stack_paths: List[Path],
+    *,
+    reducer: str,
+    resampling_method: Resampling,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    if not stack_paths:
+        raise ValueError("stack_paths is empty")
+    if reducer not in {"min", "max"}:
+        raise ValueError("reducer must be 'min' or 'max'")
+
+    first_arr, first_profile = _read_stack_with_nan(stack_paths[0])
+    aligned = [first_arr]
+
+    for path in stack_paths[1:]:
+        arr, profile = _read_stack_with_nan(path)
+        aligned_arr = _reproject_to_reference(
+            arr,
+            profile,
+            first_profile,
+            resampling_method=resampling_method,
+        )
+        aligned.append(aligned_arr)
+
+    stack = np.stack(aligned, axis=0)
+    with np.errstate(all="ignore"):
+        if reducer == "min":
+            composite = np.nanmin(stack, axis=0)
+        else:
+            composite = np.nanmax(stack, axis=0)
+
+    out_profile = first_profile.copy()
+    out_profile.update({"count": composite.shape[0], "compress": "lzw"})
+    return composite, out_profile
 
 
 def _write_composite_bands(
@@ -596,8 +744,16 @@ def _process_satellite_imagery(
     max_cloud = config.get("max_cloud_cover", 80)
     cloudmask_classes = [int(v) for v in config.get("cloudmask", [1, 2, 3])]
     omnicloudmask_cfg = config.get("omnicloudmask", {})
+    snowmask_cfg = config.get("snowmask", {})
+    snowmask_enabled = bool(snowmask_cfg.get("enabled", False))
+    ndsi_threshold = float(snowmask_cfg.get("ndsi_threshold", 0.4))
+    red_threshold = float(snowmask_cfg.get("red_threshold", 0.2))
 
-    download_band_numbers, requested_band_numbers = _resolve_band_request(config, satellite_key)
+    download_band_numbers, _ = _resolve_band_request(
+        config,
+        satellite_key,
+        snowmask_enabled=snowmask_enabled,
+    )
     target_resolution = TARGET_RESOLUTION[satellite_key]
 
     if satellite_key == "sentinel2":
@@ -609,15 +765,26 @@ def _process_satellite_imagery(
         out_sat_dir = output_root / "landsat89"
         band_map = LANDSAT_BAND_MAP
 
-    raw_dir = out_sat_dir / "raw"
     img_dir = out_sat_dir / "img"
+    masked_dir = out_sat_dir / "masked"
+    snowmasked_dir = out_sat_dir / "snowmasked"
+    cloudmask_dir = out_sat_dir / "cloudmask"
     stack_tmp_dir = out_sat_dir / "_stack_tmp"
     masked_tmp_dir = out_sat_dir / "_masked_tmp"
+    snowmasked_tmp_dir = out_sat_dir / "_snowmasked_tmp"
+    cloudmask_tmp_dir = out_sat_dir / "_cloudmask_tmp"
+    snowmask_tmp_dir = out_sat_dir / "_snowmask_tmp"
 
-    raw_dir.mkdir(parents=True, exist_ok=True)
     img_dir.mkdir(parents=True, exist_ok=True)
+    masked_dir.mkdir(parents=True, exist_ok=True)
+    snowmasked_dir.mkdir(parents=True, exist_ok=True)
+    cloudmask_dir.mkdir(parents=True, exist_ok=True)
     stack_tmp_dir.mkdir(parents=True, exist_ok=True)
     masked_tmp_dir.mkdir(parents=True, exist_ok=True)
+    cloudmask_tmp_dir.mkdir(parents=True, exist_ok=True)
+    if snowmask_enabled:
+        snowmasked_tmp_dir.mkdir(parents=True, exist_ok=True)
+        snowmask_tmp_dir.mkdir(parents=True, exist_ok=True)
 
     items = _search_stac_items(
         collection=collection,
@@ -639,11 +806,16 @@ def _process_satellite_imagery(
         return {
             "searched_items": 0,
             "processed_items": 0,
-            "composites": 0,
+            "masked_items": 0,
+            "snowmasked_items": 0,
+            "cloudmask_items": 0,
         }
 
-    grouped_masked: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
     processed_items = 0
+    grouped_masked: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
+    grouped_cloudmask: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
+    grouped_snowmasked: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
+    grouped_snowmask: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
 
     try:
         for item in items:
@@ -668,17 +840,14 @@ def _process_satellite_imagery(
                 output_stack_path=stack_path,
             )
 
-            _write_band_files_from_stack(
-                stack_path=stack_path,
-                output_dir=raw_dir,
-                base_stem=f"{prefix}_{date_token}",
-                band_numbers=download_info["band_numbers"],
-                requested_band_numbers=download_info["band_numbers"],
-                band_map=band_map,
-            )
+            scene_stem = f"{prefix}_{date_token}_{scene_tag}"
+            img_stack_path = img_dir / f"{scene_stem}.tif"
+            shutil.copy2(stack_path, img_stack_path)
 
-            cloudmask_path = _unique_tif_path(raw_dir, f"{prefix}_{date_token}_omnicloudmask")
-            masked_stack_path = masked_tmp_dir / f"{prefix}_{date_token}_{scene_tag}_masked.tif"
+            group_key = (prefix, date_token)
+
+            cloudmask_path = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
+            masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
 
             _run_cloudmask_and_mask(
                 stack_path=stack_path,
@@ -691,35 +860,119 @@ def _process_satellite_imagery(
                 omnicloudmask_cfg=omnicloudmask_cfg,
                 conversion_satellite_type=conversion_sat_type,
             )
+            grouped_masked[group_key].append(masked_stack_path)
+            grouped_cloudmask[group_key].append(cloudmask_path)
 
-            grouped_masked[(prefix, date_token)].append(masked_stack_path)
+            if snowmask_enabled:
+                snowmask_path = snowmask_tmp_dir / f"{scene_stem}_snowmask.tif"
+                _create_ndsi_snow_mask_local(
+                    image_path=stack_path,
+                    output_path=snowmask_path,
+                    satellite_key=satellite_key,
+                    download_band_numbers=download_info["band_numbers"],
+                    ndsi_threshold=ndsi_threshold,
+                    red_threshold=red_threshold,
+                )
+
+                snowmasked_stack_path = snowmasked_tmp_dir / f"{scene_stem}_snowmasked.tif"
+                _apply_cloud_mask_local(
+                    image_path=stack_path,
+                    mask_path=cloudmask_path,
+                    output_path=snowmasked_stack_path,
+                    mask_classes=cloudmask_classes,
+                    satellite_type=conversion_sat_type,
+                    snow_mask_path=snowmask_path,
+                )
+                grouped_snowmasked[group_key].append(snowmasked_stack_path)
+                grouped_snowmask[group_key].append(snowmask_path)
+
             processed_items += 1
 
-        composites = 0
-        for (prefix, date_token), masked_paths in grouped_masked.items():
-            if not masked_paths:
-                continue
-
-            composite, profile = _composite_masked_stacks(masked_paths)
-            _write_composite_bands(
-                composite=composite,
-                profile=profile,
-                output_dir=img_dir,
-                base_stem=f"{prefix}_{date_token}",
-                band_numbers=download_band_numbers,
-                requested_band_numbers=requested_band_numbers,
-                band_map=band_map,
+        masked_items = 0
+        for (prefix, date_token), paths in sorted(grouped_masked.items()):
+            composite, profile = _composite_stacks(
+                paths,
+                reducer="min",
+                resampling_method=Resampling.bilinear,
             )
-            composites += 1
+            out_path = masked_dir / f"{prefix}_{date_token}_masked.tif"
+            profile.update({
+                "dtype": "float32",
+                "nodata": float("nan"),
+                "compress": "lzw",
+            })
+            with rasterio.open(out_path, "w", **profile) as dst:
+                dst.write(composite.astype(np.float32))
+            masked_items += 1
+
+        cloudmask_items = 0
+        for (prefix, date_token), paths in sorted(grouped_cloudmask.items()):
+            composite, profile = _composite_stacks(
+                paths,
+                reducer="min",
+                resampling_method=Resampling.nearest,
+            )
+            out_path = cloudmask_dir / f"{prefix}_{date_token}_cloudmask.tif"
+            composite_uint8 = np.where(np.isnan(composite), 0, composite).astype(np.uint8)
+            profile.update({
+                "count": composite_uint8.shape[0],
+                "dtype": "uint8",
+                "nodata": None,
+                "compress": "lzw",
+            })
+            with rasterio.open(out_path, "w", **profile) as dst:
+                dst.write(composite_uint8)
+            cloudmask_items += 1
+
+        snowmasked_items = 0
+        if snowmask_enabled:
+            for (prefix, date_token), paths in sorted(grouped_snowmasked.items()):
+                composite, profile = _composite_stacks(
+                    paths,
+                    reducer="min",
+                    resampling_method=Resampling.bilinear,
+                )
+                out_path = snowmasked_dir / f"{prefix}_{date_token}_snowmasked.tif"
+                profile.update({
+                    "dtype": "float32",
+                    "nodata": float("nan"),
+                    "compress": "lzw",
+                })
+                with rasterio.open(out_path, "w", **profile) as dst:
+                    dst.write(composite.astype(np.float32))
+                snowmasked_items += 1
+
+            for (prefix, date_token), paths in sorted(grouped_snowmask.items()):
+                composite, profile = _composite_stacks(
+                    paths,
+                    reducer="max",
+                    resampling_method=Resampling.nearest,
+                )
+                out_path = cloudmask_dir / f"{prefix}_{date_token}_snowmask.tif"
+                composite_uint8 = np.where(np.isnan(composite), 255, composite).astype(np.uint8)
+                profile.update({
+                    "count": composite_uint8.shape[0],
+                    "dtype": "uint8",
+                    "nodata": 255,
+                    "compress": "lzw",
+                })
+                with rasterio.open(out_path, "w", **profile) as dst:
+                    dst.write(composite_uint8)
 
         return {
             "searched_items": len(items),
             "processed_items": processed_items,
-            "composites": composites,
+            "masked_items": masked_items,
+            "snowmasked_items": snowmasked_items,
+            "cloudmask_items": cloudmask_items,
+            "snowmask_enabled": snowmask_enabled,
         }
     finally:
         shutil.rmtree(stack_tmp_dir, ignore_errors=True)
         shutil.rmtree(masked_tmp_dir, ignore_errors=True)
+        shutil.rmtree(cloudmask_tmp_dir, ignore_errors=True)
+        shutil.rmtree(snowmasked_tmp_dir, ignore_errors=True)
+        shutil.rmtree(snowmask_tmp_dir, ignore_errors=True)
 
 
 def _safe_shp_field_name(name: str, used: set[str]) -> str:
@@ -870,13 +1123,17 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
     if "satellite" not in config:
         raise ValueError("config.satellite is required")
 
-    geojson_path = Path(config["geojson"])
-    if not geojson_path.is_absolute():
-        geojson_path = (config_dir / geojson_path).resolve()
+    geojson_path = _resolve_runtime_path(
+        str(config["geojson"]),
+        config_dir,
+        must_exist=True,
+    )
 
-    output_root = Path(config.get("output", "output"))
-    if not output_root.is_absolute():
-        output_root = (config_dir / output_root).resolve()
+    output_root = _resolve_runtime_path(
+        str(config.get("output", "output")),
+        config_dir,
+        must_exist=False,
+    )
 
     start_date = _to_date(str(config["startday"]))
     end_date = _to_date(str(config["endday"]))

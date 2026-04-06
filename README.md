@@ -5,9 +5,9 @@
 このリポジトリは、設定ファイル駆動で動作する衛星画像処理パイプラインです。主な処理フローは次の通りです。
 
 1. Microsoft Planetary Computer STAC から Sentinel-2 L2A / Landsat 8・9 L2 を検索
-2. GeoJSON の AOI で切り出し、バンド別 TIFF を保存
+2. GeoJSON の AOI で切り出し、スタック済み TIFF（マルチバンド）を保存
 3. インストール済みの omnicloudmask パッケージで雲マスクを生成
-4. 雲マスク適用と同日最小値コンポジットを作成
+4. 雲マスク適用、および設定に応じて雪マスク適用
 5. FIRMS の active fire データを取得し、Shapefile で保存
 
 ## プロジェクト構成
@@ -25,14 +25,22 @@
 - band: all または at
 - num: band が at のときに取得するバンド番号配列
 - cloudmask: マスク対象クラス（1, 2, 3）
+- snowmask.enabled: 雪マスク処理を行うかどうか（true/false）
 
 ## 出力
 
-- Sentinel-2 生データ: output/sentinel2/raw/S2C_yyyymmdd_Bxx.tif
-- Sentinel-2 前処理済み: output/sentinel2/img/S2C_yyyymmdd_Bxx.tif
-- Landsat 8/9 生データ: output/landsat89/raw/L8C_yyyymmdd_Bxx.tif, L9C_yyyymmdd_Bxx.tif
-- Landsat 8/9 前処理済み: output/landsat89/img/L8C_yyyymmdd_Bxx.tif, L9C_yyyymmdd_Bxx.tif
-- 雲マスク: 各 raw ディレクトリに *_omnicloudmask.tif
+注記: img 以外（masked / snowmasked / cloudmask）は同日コンポジット後の結果を保存します。
+
+- Sentinel-2 出力:
+  - output/sentinel2/img: 生データ（スタック、シーン単位）
+  - output/sentinel2/masked: 雲マスク適用済み（同日コンポジット）
+  - output/sentinel2/snowmasked: 雲+雪マスク適用済み（同日コンポジット、snowmask.enabled=true の場合）
+  - output/sentinel2/cloudmask: 雲マスクと雪マスク（同日コンポジット）
+- Landsat 8/9 出力:
+  - output/landsat89/img: 生データ（スタック、シーン単位）
+  - output/landsat89/masked: 雲マスク適用済み（同日コンポジット）
+  - output/landsat89/snowmasked: 雲+雪マスク適用済み（同日コンポジット、snowmask.enabled=true の場合）
+  - output/landsat89/cloudmask: 雲マスクと雪マスク（同日コンポジット）
 - Active fire（Shapefile）:
   - output/modis/activefire/ACFR_yyyymmdd_tttt.shp
   - output/viirs/activefire/ACFR_yyyymmdd_tttt.shp
@@ -81,6 +89,8 @@ docker compose run --rm downloader
   必ず config/config.yaml（または関数引数）でそのパスを明示指定してください。
 - 省略すると、既定の相対パス（./config/... や ./output）が使われるため、
   意図しない場所を参照・出力してしまう可能性があります。
+- config/config.yaml を使う場合、相対パスは基本的にプロジェクトルート
+  （run.py があるディレクトリ）基準で解決されます。
 
 データをリポジトリ配下に置く運用なら、./config/area.geojson と ./output のような相対パスが最も簡単で可搬性が高いです。
 
