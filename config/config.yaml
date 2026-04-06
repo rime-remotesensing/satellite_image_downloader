@@ -1,18 +1,20 @@
 # Core inputs
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
-geojson: ./config/area.geojson
-startday: "20240101"
-endday: "20240131"
+geojson: ./config/no5.geojson
+startday: "20230121"
+endday: "20230121"
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
 satellite:
   - sentinel2
-  - landsat89
-  - modis
-  - viirs
 
 # Output root directory
+# 出力は各衛星ごとに以下を作成:
+# output/<satellite>/img         (生データ, シーン単位)
+# output/<satellite>/masked      (同日コンポジット)
+# output/<satellite>/snowmasked  (同日コンポジット)
+# output/<satellite>/cloudmask   (同日コンポジット)
 output: ./output
 
 # Band selection
@@ -34,6 +36,12 @@ omnicloudmask:
   patch_size: 1000
   patch_overlap: 300
   device: cuda
+
+# Snow mask options
+snowmask:
+  enabled: true
+  ndsi_threshold: 0.4
+  red_threshold: 0.2
 
 # FIRMS API settings
 firms:
