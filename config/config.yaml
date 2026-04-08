@@ -1,13 +1,17 @@
 # Core inputs
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
-geojson: ./config/no5.geojson
-startday: "20230121"
-endday: "20230121"
+geojson: ./config/kyoto.geojson
+startday: [20230306]
+endday:   [20230410]
+# 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
+
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
+# FIRMS active fire targets are recommended to be set in firms.activefire_satellite
 satellite:
-  - sentinel2
+  - viirs
+  - modis
 
 # Output root directory
 # 出力は各衛星ごとに以下を作成:
@@ -43,11 +47,37 @@ snowmask:
   ndsi_threshold: 0.4
   red_threshold: 0.2
 
+# Metadata GeoJSON options
+# 例: 20240201-20240415.geojson
+metadata:
+  enabled: true
+
 # FIRMS API settings
 firms:
+  # active fire の取得対象（modis / viirs を任意に選択）
+  activefire_satellite:
+    - viirs
+    - modis
+  # APIキーは key.env から読み込む（推奨）
+  # 例: FIRMS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  key_env_path: ./key.env
   api_key: ""
   base_url: "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
-  days: 31
+  # true の場合、取得結果を最後にAOIポリゴンで切り抜く
+  clip_to_aoi: true
+  # FIRMS取得用のBBOXをAOIから上下左右に広げる距離[m]
+  bbox_buffer_m: 500
+  # FIRMS area API の day range は 1..5
+  days: 5
+  # true の場合、startday-endday 全期間の総まとめ Shapefile も1つ出力
+  period_summary: true
+  # 直近監視：NRT, 過去の解析：SP
   product_map:
-    modis: MODIS_NRT
-    viirs: VIIRS_SNPP_NRT
+    # MODIS_SP は Terra/Aqua を含む標準処理データ
+    modis:
+      - MODIS_SP
+    # VIIRS はセンサ別。SNPP + NOAA-20 を両方取得
+    # NOAA-21 は現状 NRT 系のみ（必要なら VIIRS_NOAA21_NRT を追加）
+    viirs:
+      - VIIRS_SNPP_SP
+      - VIIRS_NOAA20_SP

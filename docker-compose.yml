@@ -7,10 +7,20 @@ services:
     container_name: satellite-downloader
     gpus: all
     working_dir: /workspace
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+      TORCH_HOME: /root/.cache/torch
     volumes:
       - ./:/workspace
       - ${SATDL_HOST_DATA_PATH:-./data}:/host_data
+      - satdl_model_cache:/root/.cache
+      - satdl_model_data:/root/.local/share
     command: ["python3", "run.py", "--config", "config/config.yaml"]
     stdin_open: true
     tty: true
     shm_size: "8gb"
+
+volumes:
+  satdl_model_cache:
+  satdl_model_data:
