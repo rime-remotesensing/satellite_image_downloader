@@ -5,10 +5,11 @@ import io
 import json
 import logging
 import math
+import os
 import re
 import shutil
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -22,7 +23,7 @@ from rasterio.enums import Resampling
 from rasterio.features import bounds as geometry_bounds
 from rasterio.transform import Affine, from_origin
 from rasterio.vrt import WarpedVRT
-from rasterio.warp import reproject, transform_geom
+from rasterio.warp import reproject, transform as warp_transform, transform_geom
 
 try:
     import yaml
@@ -240,6 +241,25 @@ def _load_config(config_path: Path) -> Dict[str, Any]:
     return loaded or {}
 
 
+def _load_env_kv_file(env_path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    if not env_path.exists():
+        return values
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
+
 def _resolve_runtime_path(
     path_value: str,
     config_dir: Path,
@@ -273,6 +293,27 @@ def _to_date(value: str) -> date:
     return datetime.strptime(value, "%Y%m%d").date()
 
 
+def _normalize_date_list(value: Any, field_name: str) -> List[date]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        values = list(value)
+    else:
+        values = [value]
+
+    if not values:
+        raise ValueError(f"config.{field_name} must not be empty")
+
+    dates: List[date] = []
+    for raw in values:
+        text = str(raw).strip()
+        if not re.fullmatch(r"\d{8}", text):
+            raise ValueError(
+                f"config.{field_name} must be YYYYMMDD or list of YYYYMMDD values"
+            )
+        dates.append(_to_date(text))
+
+    return dates
+
+
 def _normalize_satellites(value: Any) -> List[str]:
     if isinstance(value, str):
         sats = [v.strip().lower() for v in value.split(",") if v.strip()]
@@ -290,6 +331,53 @@ def _normalize_satellites(value: Any) -> List[str]:
     for sat in sats:
         if sat not in deduped:
             deduped.append(sat)
+    return deduped
+
+
+def _normalize_activefire_satellites(value: Any) -> List[str]:
+    if isinstance(value, str):
+        sats = [v.strip().lower() for v in value.split(",") if v.strip()]
+    elif isinstance(value, Sequence):
+        sats = [str(v).strip().lower() for v in value if str(v).strip()]
+    else:
+        raise ValueError("config.firms.activefire_satellite must be string or list")
+
+    allowed = {"modis", "viirs"}
+    invalid = [s for s in sats if s not in allowed]
+    if invalid:
+        raise ValueError(
+            f"Unsupported satellites in config.firms.activefire_satellite: {invalid}"
+        )
+
+    deduped: List[str] = []
+    for sat in sats:
+        if sat not in deduped:
+            deduped.append(sat)
+    return deduped
+
+
+def _normalize_firms_products(
+    value: Any,
+    *,
+    default_products: List[str],
+    field_name: str,
+) -> List[str]:
+    if value is None:
+        raw = list(default_products)
+    elif isinstance(value, str):
+        raw = [v.strip() for v in value.split(",") if v.strip()]
+    elif isinstance(value, Sequence):
+        raw = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        raise ValueError(f"{field_name} must be string or list")
+
+    if not raw:
+        raw = list(default_products)
+
+    deduped: List[str] = []
+    for product in raw:
+        if product not in deduped:
+            deduped.append(product)
     return deduped
 
 
@@ -316,6 +404,97 @@ def _load_aoi_geometry(geojson_path: Path) -> Dict[str, Any]:
 def _bbox_from_geometry(geometry: Dict[str, Any]) -> Tuple[float, float, float, float]:
     bounds = geometry_bounds(geometry)
     return float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])
+
+
+def _expand_bbox_by_meters(
+    bbox: Tuple[float, float, float, float],
+    buffer_m: float,
+) -> Tuple[float, float, float, float]:
+    if buffer_m <= 0:
+        return bbox
+
+    west, south, east, north = bbox
+    center_lat = max(-89.9999, min(89.9999, (south + north) / 2.0))
+
+    meters_per_degree_lat = 111320.0
+    meters_per_degree_lon = max(1.0, 111320.0 * math.cos(math.radians(center_lat)))
+
+    dlat = buffer_m / meters_per_degree_lat
+    dlon = buffer_m / meters_per_degree_lon
+
+    expanded = (
+        max(-180.0, west - dlon),
+        max(-90.0, south - dlat),
+        min(180.0, east + dlon),
+        min(90.0, north + dlat),
+    )
+    return expanded
+
+
+def _point_on_segment(
+    x: float,
+    y: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    eps: float = 1e-12,
+) -> bool:
+    # Collinearity check
+    cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+    if abs(cross) > eps:
+        return False
+
+    # Bounding box check
+    if x < min(x1, x2) - eps or x > max(x1, x2) + eps:
+        return False
+    if y < min(y1, y2) - eps or y > max(y1, y2) + eps:
+        return False
+    return True
+
+
+def _point_in_ring(lon: float, lat: float, ring: List[List[float]]) -> bool:
+    if len(ring) < 3:
+        return False
+
+    inside = False
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+
+        if _point_on_segment(lon, lat, x1, y1, x2, y2):
+            return True
+
+        intersects = ((y1 > lat) != (y2 > lat)) and (
+            lon < (x2 - x1) * (lat - y1) / ((y2 - y1) + 1e-300) + x1
+        )
+        if intersects:
+            inside = not inside
+    return inside
+
+
+def _point_in_geometry(lon: float, lat: float, geometry: Dict[str, Any]) -> bool:
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if not coords:
+        return False
+
+    def in_polygon(poly_coords: List[List[List[float]]]) -> bool:
+        outer = poly_coords[0]
+        holes = poly_coords[1:]
+        if not _point_in_ring(lon, lat, outer):
+            return False
+        for hole in holes:
+            if _point_in_ring(lon, lat, hole):
+                return False
+        return True
+
+    if gtype == "Polygon":
+        return in_polygon(coords)
+    if gtype == "MultiPolygon":
+        return any(in_polygon(poly) for poly in coords)
+    return False
 
 
 def _resolve_band_request(
@@ -376,6 +555,129 @@ def _item_datetime(item: Item) -> datetime:
     if not raw:
         raise ValueError(f"Item {item.id} has no datetime")
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def _crs_to_string(crs_obj: Any) -> Optional[str]:
+    if crs_obj is None:
+        return None
+    if hasattr(crs_obj, "to_string"):
+        try:
+            return str(crs_obj.to_string())
+        except Exception:
+            pass
+    text = str(crs_obj).strip()
+    return text or None
+
+
+def _infer_item_output_crs(item: Item) -> Optional[str]:
+    epsg = item.properties.get("proj:epsg")
+    if epsg is not None:
+        try:
+            return f"EPSG:{int(epsg)}"
+        except (TypeError, ValueError):
+            pass
+
+    for asset in item.assets.values():
+        asset_epsg = asset.extra_fields.get("proj:epsg") if asset.extra_fields else None
+        if asset_epsg is not None:
+            try:
+                return f"EPSG:{int(asset_epsg)}"
+            except (TypeError, ValueError):
+                continue
+
+    for asset in item.assets.values():
+        if asset.media_type and "image" not in asset.media_type:
+            continue
+        href = planetary_computer.sign(asset.href)
+        with rasterio.open(href) as src:
+            return _crs_to_string(src.crs)
+
+    return None
+
+
+def _get_first_float(properties: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    for key in keys:
+        value = properties.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_solar_angles(item: Item) -> Tuple[Optional[float], Optional[float]]:
+    props = item.properties
+
+    solar_azimuth = _get_first_float(
+        props,
+        [
+            "view:sun_azimuth",
+            "s2:mean_solar_azimuth",
+            "solar_azimuth",
+            "sun_azimuth",
+        ],
+    )
+
+    solar_zenith = _get_first_float(
+        props,
+        [
+            "view:sun_zenith",
+            "s2:mean_solar_zenith",
+            "solar_zenith",
+            "sun_zenith",
+        ],
+    )
+
+    if solar_zenith is None:
+        solar_elevation = _get_first_float(
+            props,
+            [
+                "view:sun_elevation",
+                "sun_elevation",
+                "solar_elevation",
+            ],
+        )
+        if solar_elevation is not None:
+            solar_zenith = 90.0 - solar_elevation
+
+    return solar_azimuth, solar_zenith
+
+
+def _build_metadata_feature(item: Item) -> Optional[Dict[str, Any]]:
+    if item.geometry is None:
+        return None
+
+    acquired = _item_datetime(item).strftime("%Y-%m-%d %H:%M:%S")
+    solar_azimuth, solar_zenith = _extract_solar_angles(item)
+
+    props: Dict[str, Any] = {
+        "Acquisition_Date": acquired,
+        "Image_ID": item.id,
+        "Solar_Azimuth_Angle": solar_azimuth,
+        "Solar_Zenith_Angle": solar_zenith,
+    }
+
+    return {
+        "type": "Feature",
+        "geometry": item.geometry,
+        "id": item.id,
+        "properties": props,
+    }
+
+
+def _save_metadata_geojson(
+    metadata_features: List[Dict[str, Any]],
+    output_path: Path,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "type": "FeatureCollection",
+        "features": metadata_features,
+    }
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
 
 def _build_grid_for_item(item: Item, geometry_wgs84: Dict[str, Any], target_resolution: float) -> Tuple[Any, Affine, int, int, Dict[str, Any]]:
@@ -748,6 +1050,8 @@ def _process_satellite_imagery(
     snowmask_enabled = bool(snowmask_cfg.get("enabled", False))
     ndsi_threshold = float(snowmask_cfg.get("ndsi_threshold", 0.4))
     red_threshold = float(snowmask_cfg.get("red_threshold", 0.2))
+    metadata_cfg = config.get("metadata", {})
+    metadata_enabled = bool(metadata_cfg.get("enabled", True))
 
     download_band_numbers, _ = _resolve_band_request(
         config,
@@ -769,17 +1073,18 @@ def _process_satellite_imagery(
     masked_dir = out_sat_dir / "masked"
     snowmasked_dir = out_sat_dir / "snowmasked"
     cloudmask_dir = out_sat_dir / "cloudmask"
-    stack_tmp_dir = out_sat_dir / "_stack_tmp"
     masked_tmp_dir = out_sat_dir / "_masked_tmp"
     snowmasked_tmp_dir = out_sat_dir / "_snowmasked_tmp"
     cloudmask_tmp_dir = out_sat_dir / "_cloudmask_tmp"
     snowmask_tmp_dir = out_sat_dir / "_snowmask_tmp"
 
+    metadata_filename = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.geojson"
+    metadata_output_path = img_dir / metadata_filename
+
     img_dir.mkdir(parents=True, exist_ok=True)
     masked_dir.mkdir(parents=True, exist_ok=True)
     snowmasked_dir.mkdir(parents=True, exist_ok=True)
     cloudmask_dir.mkdir(parents=True, exist_ok=True)
-    stack_tmp_dir.mkdir(parents=True, exist_ok=True)
     masked_tmp_dir.mkdir(parents=True, exist_ok=True)
     cloudmask_tmp_dir.mkdir(parents=True, exist_ok=True)
     if snowmask_enabled:
@@ -812,6 +1117,8 @@ def _process_satellite_imagery(
         }
 
     processed_items = 0
+    output_crs: Optional[str] = None
+    metadata_features: List[Dict[str, Any]] = []
     grouped_masked: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
     grouped_cloudmask: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
     grouped_snowmasked: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
@@ -829,7 +1136,8 @@ def _process_satellite_imagery(
                 prefix, conversion_sat_type = _landsat_prefix(item)
 
             scene_tag = re.sub(r"[^A-Za-z0-9]", "", item.id)[-24:] or "SCENE"
-            stack_path = stack_tmp_dir / f"{prefix}_{date_token}_{scene_tag}_stack.tif"
+            scene_stem = f"{prefix}_{date_token}_{scene_tag}"
+            img_stack_path = img_dir / f"{scene_stem}.tif"
 
             download_info = _download_item_stack(
                 item=item,
@@ -837,12 +1145,18 @@ def _process_satellite_imagery(
                 target_resolution=target_resolution,
                 band_map=band_map,
                 download_band_numbers=download_band_numbers,
-                output_stack_path=stack_path,
+                output_stack_path=img_stack_path,
             )
 
-            scene_stem = f"{prefix}_{date_token}_{scene_tag}"
-            img_stack_path = img_dir / f"{scene_stem}.tif"
-            shutil.copy2(stack_path, img_stack_path)
+            if output_crs is None:
+                output_crs = _crs_to_string(download_info["profile"].get("crs"))
+                if output_crs is None:
+                    output_crs = _infer_item_output_crs(item)
+
+            if metadata_enabled:
+                feature = _build_metadata_feature(item)
+                if feature is not None:
+                    metadata_features.append(feature)
 
             group_key = (prefix, date_token)
 
@@ -850,7 +1164,7 @@ def _process_satellite_imagery(
             masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
 
             _run_cloudmask_and_mask(
-                stack_path=stack_path,
+                stack_path=img_stack_path,
                 cloudmask_path=cloudmask_path,
                 masked_stack_path=masked_stack_path,
                 satellite_key=satellite_key,
@@ -866,7 +1180,7 @@ def _process_satellite_imagery(
             if snowmask_enabled:
                 snowmask_path = snowmask_tmp_dir / f"{scene_stem}_snowmask.tif"
                 _create_ndsi_snow_mask_local(
-                    image_path=stack_path,
+                    image_path=img_stack_path,
                     output_path=snowmask_path,
                     satellite_key=satellite_key,
                     download_band_numbers=download_info["band_numbers"],
@@ -876,7 +1190,7 @@ def _process_satellite_imagery(
 
                 snowmasked_stack_path = snowmasked_tmp_dir / f"{scene_stem}_snowmasked.tif"
                 _apply_cloud_mask_local(
-                    image_path=stack_path,
+                    image_path=img_stack_path,
                     mask_path=cloudmask_path,
                     output_path=snowmasked_stack_path,
                     mask_classes=cloudmask_classes,
@@ -959,6 +1273,9 @@ def _process_satellite_imagery(
                 with rasterio.open(out_path, "w", **profile) as dst:
                     dst.write(composite_uint8)
 
+        if metadata_enabled and metadata_features:
+            _save_metadata_geojson(metadata_features, metadata_output_path)
+
         return {
             "searched_items": len(items),
             "processed_items": processed_items,
@@ -966,9 +1283,11 @@ def _process_satellite_imagery(
             "snowmasked_items": snowmasked_items,
             "cloudmask_items": cloudmask_items,
             "snowmask_enabled": snowmask_enabled,
+            "output_crs": output_crs,
+            "metadata_enabled": metadata_enabled,
+            "metadata_file": str(metadata_output_path) if metadata_enabled and metadata_features else None,
         }
     finally:
-        shutil.rmtree(stack_tmp_dir, ignore_errors=True)
         shutil.rmtree(masked_tmp_dir, ignore_errors=True)
         shutil.rmtree(cloudmask_tmp_dir, ignore_errors=True)
         shutil.rmtree(snowmasked_tmp_dir, ignore_errors=True)
@@ -994,10 +1313,19 @@ def _safe_shp_field_name(name: str, used: set[str]) -> str:
         idx += 1
 
 
-def _write_activefire_shapefile(output_shp_path: Path, rows: List[Dict[str, str]]) -> None:
+def _write_activefire_shapefile(
+    output_shp_path: Path,
+    rows: List[Dict[str, str]],
+    *,
+    output_crs: str = "EPSG:4326",
+) -> None:
     output_shp_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = shapefile.Writer(str(output_shp_path), shapeType=shapefile.POINT)
+
+    target_crs = rasterio.crs.CRS.from_string(output_crs)
+    target_crs_text = _crs_to_string(target_crs) or "EPSG:4326"
+    needs_reproject = target_crs_text.upper() != "EPSG:4326"
 
     source_fields = [k for k in rows[0].keys() if k.lower() not in {"latitude", "longitude", "lat", "lon"}]
     field_name_map: Dict[str, str] = {}
@@ -1020,14 +1348,20 @@ def _write_activefire_shapefile(output_shp_path: Path, rows: List[Dict[str, str]
         except ValueError:
             continue
 
-        writer.point(lon, lat)
+        x, y = lon, lat
+        if needs_reproject:
+            x_vals, y_vals = warp_transform("EPSG:4326", target_crs_text, [lon], [lat])
+            x, y = float(x_vals[0]), float(y_vals[0])
+
+        writer.point(x, y)
         record = [str(row.get(field, ""))[:254] for field in source_fields]
         writer.record(*record)
 
     writer.close()
 
     prj_path = output_shp_path.with_suffix(".prj")
-    prj_path.write_text(WGS84, encoding="utf-8")
+    prj_text = target_crs.to_wkt() if target_crs is not None else WGS84
+    prj_path.write_text(prj_text, encoding="utf-8")
 
 
 def _fetch_firms_rows(
@@ -1036,13 +1370,23 @@ def _fetch_firms_rows(
     bbox: Tuple[float, float, float, float],
     days: int,
     base_url: str,
+    start_on: Optional[date] = None,
 ) -> List[Dict[str, str]]:
     west, south, east, north = bbox
     bbox_token = f"{west:.6f},{south:.6f},{east:.6f},{north:.6f}"
     url = f"{base_url.rstrip('/')}/{api_key}/{product}/{bbox_token}/{days}"
+    if start_on is not None:
+        url = f"{url}/{start_on.isoformat()}"
 
     response = requests.get(url, timeout=120)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = response.text.strip().replace("\n", " ")
+        raise RuntimeError(
+            f"FIRMS request failed ({response.status_code}) for product={product}, "
+            f"days={days}, bbox={bbox_token}: {detail}"
+        ) from exc
 
     text = response.text.strip()
     if not text:
@@ -1054,17 +1398,53 @@ def _fetch_firms_rows(
 
 def _process_activefire(
     config: Dict[str, Any],
+    config_dir: Path,
     output_root: Path,
     bbox: Tuple[float, float, float, float],
+    geometry_wgs84: Dict[str, Any],
+    reference_crs: Optional[str],
     start_date: date,
     end_date: date,
     satellites: List[str],
 ) -> Dict[str, Any]:
     firms_cfg = config.get("firms", {})
+
+    key_env_path_value = str(firms_cfg.get("key_env_path", "key.env")).strip() or "key.env"
+    key_env_path = _resolve_runtime_path(key_env_path_value, config_dir, must_exist=False)
+    env_values = _load_env_kv_file(key_env_path)
+
     api_key = str(firms_cfg.get("api_key", "")).strip()
     if not api_key:
-        LOGGER.warning("FIRMS api_key is not set. Active fire download is skipped.")
+        for key_name in ("FIRMS_API_KEY", "MAP_KEY", "FIRMS_MAP_KEY"):
+            candidate = str(env_values.get(key_name, "")).strip()
+            if candidate:
+                api_key = candidate
+                break
+
+    if not api_key:
+        for key_name in ("FIRMS_API_KEY", "MAP_KEY", "FIRMS_MAP_KEY"):
+            candidate = str(os.getenv(key_name, "")).strip()
+            if candidate:
+                api_key = candidate
+                break
+
+    if not api_key:
+        LOGGER.warning(
+            "FIRMS api_key is not set. Set firms.key_env_path (%s) with FIRMS_API_KEY=... (or MAP_KEY=...). Active fire download is skipped.",
+            key_env_path,
+        )
         return {"modis": 0, "viirs": 0}
+
+    bbox_buffer_m = max(0.0, float(firms_cfg.get("bbox_buffer_m", 0)))
+    if bbox_buffer_m > 0:
+        original_bbox = bbox
+        bbox = _expand_bbox_by_meters(bbox, bbox_buffer_m)
+        LOGGER.info(
+            "Expanded FIRMS bbox by %.1fm: %s -> %s",
+            bbox_buffer_m,
+            original_bbox,
+            bbox,
+        )
 
     base_url = str(
         firms_cfg.get(
@@ -1074,26 +1454,75 @@ def _process_activefire(
     )
 
     product_map = firms_cfg.get("product_map", {})
-    modis_product = str(product_map.get("modis", "MODIS_NRT"))
-    viirs_product = str(product_map.get("viirs", "VIIRS_SNPP_NRT"))
+    modis_products = _normalize_firms_products(
+        product_map.get("modis"),
+        default_products=["MODIS_NRT"],
+        field_name="config.firms.product_map.modis",
+    )
+    viirs_products = _normalize_firms_products(
+        product_map.get("viirs"),
+        default_products=["VIIRS_SNPP_NRT"],
+        field_name="config.firms.product_map.viirs",
+    )
+    products_by_sat = {
+        "modis": modis_products,
+        "viirs": viirs_products,
+    }
 
-    days = int(firms_cfg.get("days", (end_date - start_date).days + 1))
-    days = max(1, min(days, 365))
+    requested_days = int(firms_cfg.get("days", 5))
+    days = max(1, min(requested_days, 5))
+    if requested_days != days:
+        LOGGER.warning(
+            "FIRMS area API accepts days in [1..5]. requested=%s, using=%s",
+            requested_days,
+            days,
+        )
+
+    period_summary_enabled = bool(firms_cfg.get("period_summary", True))
+    clip_to_aoi = bool(firms_cfg.get("clip_to_aoi", True))
+
+    activefire_output_crs = reference_crs or "EPSG:4326"
+    LOGGER.info("Activefire output CRS (fixed): %s", activefire_output_crs)
 
     utc_token = datetime.now(timezone.utc).strftime("%H%M")
-    summary = {"modis": 0, "viirs": 0}
+    summary = {
+        "modis": 0,
+        "viirs": 0,
+        "period_summary": {"modis": 0, "viirs": 0},
+        "output_crs": activefire_output_crs,
+        "products": products_by_sat,
+    }
 
     for sat in satellites:
-        product = modis_product if sat == "modis" else viirs_product
+        products = products_by_sat.get(sat, [])
         out_dir = output_root / sat / "activefire"
 
-        rows = _fetch_firms_rows(
-            api_key=api_key,
-            product=product,
-            bbox=bbox,
-            days=days,
-            base_url=base_url,
-        )
+        rows: List[Dict[str, str]] = []
+        cursor = start_date
+        while cursor <= end_date:
+            window_end = min(cursor + timedelta(days=days - 1), end_date)
+            window_days = (window_end - cursor).days + 1
+            for product in products:
+                try:
+                    part = _fetch_firms_rows(
+                        api_key=api_key,
+                        product=product,
+                        bbox=bbox,
+                        days=window_days,
+                        base_url=base_url,
+                        start_on=cursor,
+                    )
+                    rows.extend(part)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "FIRMS fetch failed for %s (%s) window %s..%s: %s",
+                        sat,
+                        product,
+                        cursor,
+                        window_end,
+                        exc,
+                    )
+            cursor = window_end + timedelta(days=1)
 
         filtered: Dict[str, List[Dict[str, str]]] = defaultdict(list)
         for row in rows:
@@ -1105,12 +1534,44 @@ def _process_activefire(
             except ValueError:
                 continue
             if start_date <= acq_date <= end_date:
+                if clip_to_aoi:
+                    lon_raw = row.get("longitude") or row.get("lon")
+                    lat_raw = row.get("latitude") or row.get("lat")
+                    if lon_raw is None or lat_raw is None:
+                        continue
+                    try:
+                        lon = float(lon_raw)
+                        lat = float(lat_raw)
+                    except ValueError:
+                        continue
+                    if not _point_in_geometry(lon, lat, geometry_wgs84):
+                        continue
                 filtered[acq_date.strftime("%Y%m%d")].append(row)
 
         for date_token, rows_for_day in filtered.items():
             shp_path = out_dir / f"ACFR_{date_token}_{utc_token}.shp"
-            _write_activefire_shapefile(shp_path, rows_for_day)
+            _write_activefire_shapefile(
+                shp_path,
+                rows_for_day,
+                output_crs=activefire_output_crs,
+            )
             summary[sat] += 1
+
+        if period_summary_enabled:
+            merged_rows: List[Dict[str, str]] = []
+            for date_token in sorted(filtered.keys()):
+                merged_rows.extend(filtered[date_token])
+
+            if merged_rows:
+                summary_path = out_dir / (
+                    f"ACFR_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_{utc_token}.shp"
+                )
+                _write_activefire_shapefile(
+                    summary_path,
+                    merged_rows,
+                    output_crs=activefire_output_crs,
+                )
+                summary["period_summary"][sat] += 1
 
     return summary
 
@@ -1135,64 +1596,123 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
         must_exist=False,
     )
 
-    start_date = _to_date(str(config["startday"]))
-    end_date = _to_date(str(config["endday"]))
-    if end_date < start_date:
-        raise ValueError("endday must be greater than or equal to startday")
+    start_dates = _normalize_date_list(config["startday"], "startday")
+    end_dates = _normalize_date_list(config["endday"], "endday")
+
+    if len(start_dates) != len(end_dates):
+        raise ValueError(
+            "config.startday and config.endday must have the same number of values"
+        )
 
     satellites = _normalize_satellites(config["satellite"])
+    firms_cfg = config.get("firms", {})
+
+    activefire_targets: List[str]
+    if "activefire_satellite" in firms_cfg:
+        activefire_targets = _normalize_activefire_satellites(
+            firms_cfg.get("activefire_satellite")
+        )
+    else:
+        # Backward compatibility: if not specified, use legacy behavior.
+        activefire_targets = [s for s in satellites if s in {"modis", "viirs"}]
     geometry_wgs84 = _load_aoi_geometry(geojson_path)
     bbox = _bbox_from_geometry(geometry_wgs84)
 
     output_root.mkdir(parents=True, exist_ok=True)
 
-    summary: Dict[str, Any] = {
+    def _run_single_window(start_date: date, end_date: date) -> Dict[str, Any]:
+        if end_date < start_date:
+            raise ValueError("endday must be greater than or equal to startday")
+
+        summary: Dict[str, Any] = {
+            "config": {
+                "geojson": str(geojson_path),
+                "startday": start_date.strftime("%Y%m%d"),
+                "endday": end_date.strftime("%Y%m%d"),
+                "satellite": satellites,
+                "activefire_satellite": activefire_targets,
+                "output": str(output_root),
+            }
+        }
+
+        if "sentinel2" in satellites:
+            LOGGER.info("Processing Sentinel-2 imagery... (%s-%s)", start_date, end_date)
+            summary["sentinel2"] = _process_satellite_imagery(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=geometry_wgs84,
+                start_date=start_date,
+                end_date=end_date,
+                satellite_key="sentinel2",
+            )
+
+        if "landsat89" in satellites:
+            LOGGER.info("Processing Landsat 8/9 imagery... (%s-%s)", start_date, end_date)
+            summary["landsat89"] = _process_satellite_imagery(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=geometry_wgs84,
+                start_date=start_date,
+                end_date=end_date,
+                satellite_key="landsat89",
+            )
+
+        if activefire_targets:
+            activefire_crs_ref = None
+            if "sentinel2" in summary and isinstance(summary["sentinel2"], dict):
+                activefire_crs_ref = summary["sentinel2"].get("output_crs")
+
+            if not activefire_crs_ref:
+                try:
+                    s2_items = _search_stac_items(
+                        collection=SENTINEL_COLLECTION,
+                        geometry=geometry_wgs84,
+                        start_date=start_date,
+                        end_date=end_date,
+                        max_cloud_cover=config.get("max_cloud_cover", 80),
+                    )
+                    if s2_items:
+                        activefire_crs_ref = _infer_item_output_crs(s2_items[0])
+                except Exception as exc:
+                    LOGGER.warning("Failed to infer Sentinel-2 CRS for activefire output: %s", exc)
+
+            LOGGER.info("Processing FIRMS active fire data... (%s-%s)", start_date, end_date)
+            summary["activefire"] = _process_activefire(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                bbox=bbox,
+                geometry_wgs84=geometry_wgs84,
+                reference_crs=activefire_crs_ref,
+                start_date=start_date,
+                end_date=end_date,
+                satellites=activefire_targets,
+            )
+
+        return summary
+
+    windows = list(zip(start_dates, end_dates))
+    if len(windows) == 1:
+        return _run_single_window(windows[0][0], windows[0][1])
+
+    LOGGER.info("Running %d date windows from config", len(windows))
+    runs: List[Dict[str, Any]] = []
+    for idx, (start_date, end_date) in enumerate(windows, start=1):
+        LOGGER.info("Date window %d/%d: %s-%s", idx, len(windows), start_date, end_date)
+        runs.append(_run_single_window(start_date, end_date))
+
+    return {
         "config": {
             "geojson": str(geojson_path),
-            "startday": start_date.strftime("%Y%m%d"),
-            "endday": end_date.strftime("%Y%m%d"),
             "satellite": satellites,
+            "activefire_satellite": activefire_targets,
             "output": str(output_root),
-        }
+        },
+        "total_runs": len(runs),
+        "runs": runs,
     }
-
-    if "sentinel2" in satellites:
-        LOGGER.info("Processing Sentinel-2 imagery...")
-        summary["sentinel2"] = _process_satellite_imagery(
-            config=config,
-            config_dir=config_dir,
-            output_root=output_root,
-            geometry_wgs84=geometry_wgs84,
-            start_date=start_date,
-            end_date=end_date,
-            satellite_key="sentinel2",
-        )
-
-    if "landsat89" in satellites:
-        LOGGER.info("Processing Landsat 8/9 imagery...")
-        summary["landsat89"] = _process_satellite_imagery(
-            config=config,
-            config_dir=config_dir,
-            output_root=output_root,
-            geometry_wgs84=geometry_wgs84,
-            start_date=start_date,
-            end_date=end_date,
-            satellite_key="landsat89",
-        )
-
-    activefire_targets = [s for s in satellites if s in {"modis", "viirs"}]
-    if activefire_targets:
-        LOGGER.info("Processing FIRMS active fire data...")
-        summary["activefire"] = _process_activefire(
-            config=config,
-            output_root=output_root,
-            bbox=bbox,
-            start_date=start_date,
-            end_date=end_date,
-            satellites=activefire_targets,
-        )
-
-    return summary
 
 
 def run_pipeline_from_config(config_path: Path) -> Dict[str, Any]:
@@ -1207,8 +1727,8 @@ def run_pipeline_from_config(config_path: Path) -> Dict[str, Any]:
 def satellite_image_downloader(
     satellite_type: Sequence[str] | str,
     geojson_path: str,
-    sdate: str,
-    edate: str,
+    sdate: str | Sequence[str] | Sequence[int],
+    edate: str | Sequence[str] | Sequence[int],
     output_path: str,
     config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
