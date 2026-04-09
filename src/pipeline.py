@@ -19,8 +19,8 @@ import requests
 import rasterio
 from pystac.item import Item
 from pystac_client import Client
-from rasterio.enums import Resampling
-from rasterio.features import bounds as geometry_bounds
+from rasterio.enums import MergeAlg, Resampling
+from rasterio.features import bounds as geometry_bounds, rasterize
 from rasterio.transform import Affine, from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import reproject, transform as warp_transform, transform_geom
@@ -1123,6 +1123,7 @@ def _process_satellite_imagery(
     grouped_cloudmask: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
     grouped_snowmasked: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
     grouped_snowmask: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
+    reference_raster_path: Optional[str] = None
 
     try:
         for item in items:
@@ -1147,6 +1148,9 @@ def _process_satellite_imagery(
                 download_band_numbers=download_band_numbers,
                 output_stack_path=img_stack_path,
             )
+
+            if reference_raster_path is None:
+                reference_raster_path = str(img_stack_path)
 
             if output_crs is None:
                 output_crs = _crs_to_string(download_info["profile"].get("crs"))
@@ -1284,6 +1288,7 @@ def _process_satellite_imagery(
             "cloudmask_items": cloudmask_items,
             "snowmask_enabled": snowmask_enabled,
             "output_crs": output_crs,
+            "reference_raster": reference_raster_path,
             "metadata_enabled": metadata_enabled,
             "metadata_file": str(metadata_output_path) if metadata_enabled and metadata_features else None,
         }
@@ -1396,6 +1401,239 @@ def _fetch_firms_rows(
     return [dict(row) for row in reader]
 
 
+def _build_activefire_reference_grid_from_raster(
+    reference_raster_path: Path,
+) -> Optional[Dict[str, Any]]:
+    if not reference_raster_path.exists():
+        return None
+
+    with rasterio.open(reference_raster_path) as src:
+        if src.crs is None:
+            return None
+        return {
+            "crs": _crs_to_string(src.crs) or "EPSG:4326",
+            "transform": src.transform,
+            "width": int(src.width),
+            "height": int(src.height),
+            "resolution": abs(float(src.transform.a)) if src.transform.a != 0 else 10.0,
+        }
+
+
+def _build_activefire_reference_grid_from_geometry(
+    geometry_wgs84: Dict[str, Any],
+    output_crs: str,
+    resolution_m: float,
+) -> Dict[str, Any]:
+    geom_in_target = transform_geom("EPSG:4326", output_crs, geometry_wgs84, precision=6)
+    left, bottom, right, top = geometry_bounds(geom_in_target)
+    width = max(1, int(math.ceil((right - left) / resolution_m)))
+    height = max(1, int(math.ceil((top - bottom) / resolution_m)))
+    transform = from_origin(left, top, resolution_m, resolution_m)
+    return {
+        "crs": output_crs,
+        "transform": transform,
+        "width": width,
+        "height": height,
+        "resolution": resolution_m,
+    }
+
+
+def _grid_bounds_from_reference_grid(reference_grid: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    transform = reference_grid["transform"]
+    width = int(reference_grid["width"])
+    height = int(reference_grid["height"])
+
+    left = float(transform.c)
+    top = float(transform.f)
+    right = left + float(transform.a) * width
+    bottom = top + float(transform.e) * height
+
+    min_x = min(left, right)
+    max_x = max(left, right)
+    min_y = min(bottom, top)
+    max_y = max(bottom, top)
+    return min_x, min_y, max_x, max_y
+
+
+def _expand_reference_grid_to_bounds(
+    reference_grid: Dict[str, Any],
+    include_bounds: Tuple[float, float, float, float],
+) -> Dict[str, Any]:
+    transform = reference_grid["transform"]
+    res_x = abs(float(transform.a))
+    res_y = abs(float(transform.e))
+    if res_x == 0 or res_y == 0:
+        return reference_grid
+
+    current_left, current_bottom, current_right, current_top = _grid_bounds_from_reference_grid(reference_grid)
+    inc_left, inc_bottom, inc_right, inc_top = include_bounds
+
+    target_left = min(current_left, inc_left)
+    target_bottom = min(current_bottom, inc_bottom)
+    target_right = max(current_right, inc_right)
+    target_top = max(current_top, inc_top)
+
+    origin_x = float(transform.c)
+    origin_y = float(transform.f)
+
+    snap_left = origin_x + math.floor((target_left - origin_x) / res_x) * res_x
+    snap_right = origin_x + math.ceil((target_right - origin_x) / res_x) * res_x
+    snap_top = origin_y - math.floor((origin_y - target_top) / res_y) * res_y
+    snap_bottom = origin_y - math.ceil((origin_y - target_bottom) / res_y) * res_y
+
+    width = max(1, int(math.ceil((snap_right - snap_left) / res_x)))
+    height = max(1, int(math.ceil((snap_top - snap_bottom) / res_y)))
+    transform_out = from_origin(snap_left, snap_top, res_x, res_y)
+
+    expanded = dict(reference_grid)
+    expanded.update({
+        "transform": transform_out,
+        "width": width,
+        "height": height,
+    })
+    return expanded
+
+
+def _shapes_bounds(shapes: List[Tuple[Dict[str, Any], int]]) -> Optional[Tuple[float, float, float, float]]:
+    min_x: Optional[float] = None
+    min_y: Optional[float] = None
+    max_x: Optional[float] = None
+    max_y: Optional[float] = None
+
+    for geom, _ in shapes:
+        gtype = geom.get("type")
+        coords = geom.get("coordinates")
+        if gtype != "Polygon" or not coords:
+            continue
+
+        for ring in coords:
+            for pt in ring:
+                if len(pt) < 2:
+                    continue
+                x = float(pt[0])
+                y = float(pt[1])
+                min_x = x if min_x is None else min(min_x, x)
+                min_y = y if min_y is None else min(min_y, y)
+                max_x = x if max_x is None else max(max_x, x)
+                max_y = y if max_y is None else max(max_y, y)
+
+    if min_x is None or min_y is None or max_x is None or max_y is None:
+        return None
+    return min_x, min_y, max_x, max_y
+
+
+def _activefire_footprint_polygon(
+    row: Dict[str, str],
+    output_crs: str,
+    default_pixel_size: float,
+) -> Optional[Dict[str, Any]]:
+    lon_raw = row.get("longitude") or row.get("lon")
+    lat_raw = row.get("latitude") or row.get("lat")
+    if lon_raw is None or lat_raw is None:
+        return None
+
+    try:
+        lon = float(lon_raw)
+        lat = float(lat_raw)
+    except ValueError:
+        return None
+
+    try:
+        scan_km = float(row.get("scan", ""))
+    except (TypeError, ValueError):
+        scan_km = default_pixel_size / 1000.0
+
+    try:
+        track_km = float(row.get("track", ""))
+    except (TypeError, ValueError):
+        track_km = default_pixel_size / 1000.0
+
+    half_w_m = max(default_pixel_size, scan_km * 1000.0) / 2.0
+    half_h_m = max(default_pixel_size, track_km * 1000.0) / 2.0
+
+    if output_crs.upper() == "EPSG:4326":
+        meters_per_degree_lat = 111320.0
+        meters_per_degree_lon = max(1.0, 111320.0 * math.cos(math.radians(lat)))
+        dx = half_w_m / meters_per_degree_lon
+        dy = half_h_m / meters_per_degree_lat
+        x, y = lon, lat
+    else:
+        x_vals, y_vals = warp_transform("EPSG:4326", output_crs, [lon], [lat])
+        x, y = float(x_vals[0]), float(y_vals[0])
+        dx = half_w_m
+        dy = half_h_m
+
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [x - dx, y - dy],
+            [x + dx, y - dy],
+            [x + dx, y + dy],
+            [x - dx, y + dy],
+            [x - dx, y - dy],
+        ]],
+    }
+
+
+def _write_activefire_raster(
+    output_tif_path: Path,
+    rows: List[Dict[str, str]],
+    *,
+    output_crs: str,
+    reference_grid: Dict[str, Any],
+    expand_grid_to_detections: bool,
+) -> None:
+    output_tif_path.parent.mkdir(parents=True, exist_ok=True)
+
+    grid = dict(reference_grid)
+    resolution = float(grid.get("resolution", 10.0))
+
+    shapes: List[Tuple[Dict[str, Any], int]] = []
+    for row in rows:
+        geom = _activefire_footprint_polygon(
+            row,
+            output_crs=output_crs,
+            default_pixel_size=resolution,
+        )
+        if geom is not None:
+            shapes.append((geom, 1))
+
+    if expand_grid_to_detections and shapes:
+        bounds = _shapes_bounds(shapes)
+        if bounds is not None:
+            grid = _expand_reference_grid_to_bounds(grid, bounds)
+
+    transform = grid["transform"]
+    width = int(grid["width"])
+    height = int(grid["height"])
+
+    raster = np.zeros((height, width), dtype=np.uint16)
+    if shapes:
+        raster = rasterize(
+            shapes=shapes,
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            all_touched=True,
+            merge_alg=MergeAlg.add,
+            dtype="uint16",
+        )
+
+    profile = {
+        "driver": "GTiff",
+        "dtype": "uint16",
+        "count": 1,
+        "crs": output_crs,
+        "transform": transform,
+        "width": width,
+        "height": height,
+        "nodata": 0,
+        "compress": "lzw",
+    }
+    with rasterio.open(output_tif_path, "w", **profile) as dst:
+        dst.write(raster, 1)
+
+
 def _process_activefire(
     config: Dict[str, Any],
     config_dir: Path,
@@ -1403,6 +1641,7 @@ def _process_activefire(
     bbox: Tuple[float, float, float, float],
     geometry_wgs84: Dict[str, Any],
     reference_crs: Optional[str],
+    reference_raster_path: Optional[str],
     start_date: date,
     end_date: date,
     satellites: List[str],
@@ -1480,15 +1719,32 @@ def _process_activefire(
 
     period_summary_enabled = bool(firms_cfg.get("period_summary", True))
     clip_to_aoi = bool(firms_cfg.get("clip_to_aoi", True))
+    pixel_tif_enabled = bool(firms_cfg.get("pixel_tif", True))
+    pixel_resolution = max(1.0, float(firms_cfg.get("pixel_resolution", 10.0)))
+    pixel_expand_to_detections = bool(firms_cfg.get("pixel_expand_to_detections", True))
 
     activefire_output_crs = reference_crs or "EPSG:4326"
     LOGGER.info("Activefire output CRS (fixed): %s", activefire_output_crs)
+
+    reference_grid: Optional[Dict[str, Any]] = None
+    if pixel_tif_enabled and reference_raster_path:
+        reference_grid = _build_activefire_reference_grid_from_raster(Path(reference_raster_path))
+        if reference_grid is not None and reference_grid.get("crs") != activefire_output_crs:
+            reference_grid = None
+
+    if pixel_tif_enabled and reference_grid is None:
+        reference_grid = _build_activefire_reference_grid_from_geometry(
+            geometry_wgs84=geometry_wgs84,
+            output_crs=activefire_output_crs,
+            resolution_m=pixel_resolution,
+        )
 
     utc_token = datetime.now(timezone.utc).strftime("%H%M")
     summary = {
         "modis": 0,
         "viirs": 0,
         "period_summary": {"modis": 0, "viirs": 0},
+        "raster": {"modis": 0, "viirs": 0},
         "output_crs": activefire_output_crs,
         "products": products_by_sat,
     }
@@ -1496,6 +1752,7 @@ def _process_activefire(
     for sat in satellites:
         products = products_by_sat.get(sat, [])
         out_dir = output_root / sat / "activefire"
+        out_raster_dir = output_root / sat / "activefire_tif"
 
         rows: List[Dict[str, str]] = []
         cursor = start_date
@@ -1555,6 +1812,18 @@ def _process_activefire(
                 rows_for_day,
                 output_crs=activefire_output_crs,
             )
+
+            if pixel_tif_enabled and reference_grid is not None:
+                tif_path = out_raster_dir / f"ACFR_{date_token}_{utc_token}.tif"
+                _write_activefire_raster(
+                    tif_path,
+                    rows_for_day,
+                    output_crs=activefire_output_crs,
+                    reference_grid=reference_grid,
+                    expand_grid_to_detections=pixel_expand_to_detections,
+                )
+                summary["raster"][sat] += 1
+
             summary[sat] += 1
 
         if period_summary_enabled:
@@ -1571,6 +1840,19 @@ def _process_activefire(
                     merged_rows,
                     output_crs=activefire_output_crs,
                 )
+
+                if pixel_tif_enabled and reference_grid is not None:
+                    summary_tif_path = out_raster_dir / (
+                        f"ACFR_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_{utc_token}.tif"
+                    )
+                    _write_activefire_raster(
+                        summary_tif_path,
+                        merged_rows,
+                        output_crs=activefire_output_crs,
+                        reference_grid=reference_grid,
+                        expand_grid_to_detections=pixel_expand_to_detections,
+                    )
+
                 summary["period_summary"][sat] += 1
 
     return summary
@@ -1620,7 +1902,12 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
 
     output_root.mkdir(parents=True, exist_ok=True)
 
-    def _run_single_window(start_date: date, end_date: date) -> Dict[str, Any]:
+    def _run_single_window(
+        start_date: date,
+        end_date: date,
+        *,
+        include_activefire: bool = True,
+    ) -> Dict[str, Any]:
         if end_date < start_date:
             raise ValueError("endday must be greater than or equal to startday")
 
@@ -1659,10 +1946,12 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
                 satellite_key="landsat89",
             )
 
-        if activefire_targets:
+        if include_activefire and activefire_targets:
             activefire_crs_ref = None
+            activefire_reference_raster = None
             if "sentinel2" in summary and isinstance(summary["sentinel2"], dict):
                 activefire_crs_ref = summary["sentinel2"].get("output_crs")
+                activefire_reference_raster = summary["sentinel2"].get("reference_raster")
 
             if not activefire_crs_ref:
                 try:
@@ -1686,6 +1975,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
                 bbox=bbox,
                 geometry_wgs84=geometry_wgs84,
                 reference_crs=activefire_crs_ref,
+                reference_raster_path=activefire_reference_raster,
                 start_date=start_date,
                 end_date=end_date,
                 satellites=activefire_targets,
@@ -1699,11 +1989,61 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
 
     LOGGER.info("Running %d date windows from config", len(windows))
     runs: List[Dict[str, Any]] = []
+    activefire_crs_ref: Optional[str] = None
+    activefire_reference_raster: Optional[str] = None
     for idx, (start_date, end_date) in enumerate(windows, start=1):
         LOGGER.info("Date window %d/%d: %s-%s", idx, len(windows), start_date, end_date)
-        runs.append(_run_single_window(start_date, end_date))
+        run_summary = _run_single_window(
+            start_date,
+            end_date,
+            include_activefire=False,
+        )
+        runs.append(run_summary)
 
-    return {
+        if "sentinel2" in run_summary and isinstance(run_summary["sentinel2"], dict):
+            if not activefire_crs_ref:
+                activefire_crs_ref = run_summary["sentinel2"].get("output_crs")
+            if not activefire_reference_raster:
+                activefire_reference_raster = run_summary["sentinel2"].get("reference_raster")
+
+    combined_start = min(start_dates)
+    combined_end = max(end_dates)
+    activefire_summary: Optional[Dict[str, Any]] = None
+
+    if activefire_targets:
+        if not activefire_crs_ref:
+            try:
+                s2_items = _search_stac_items(
+                    collection=SENTINEL_COLLECTION,
+                    geometry=geometry_wgs84,
+                    start_date=combined_start,
+                    end_date=combined_end,
+                    max_cloud_cover=config.get("max_cloud_cover", 80),
+                )
+                if s2_items:
+                    activefire_crs_ref = _infer_item_output_crs(s2_items[0])
+            except Exception as exc:
+                LOGGER.warning("Failed to infer Sentinel-2 CRS for activefire output: %s", exc)
+
+        LOGGER.info(
+            "Processing FIRMS active fire data for combined range... (%s-%s)",
+            combined_start,
+            combined_end,
+        )
+        activefire_summary = _process_activefire(
+            config=config,
+            config_dir=config_dir,
+            output_root=output_root,
+            bbox=bbox,
+            geometry_wgs84=geometry_wgs84,
+            reference_crs=activefire_crs_ref,
+            reference_raster_path=activefire_reference_raster,
+            start_date=combined_start,
+            end_date=combined_end,
+            satellites=activefire_targets,
+        )
+
+    result: Dict[str, Any] = {
         "config": {
             "geojson": str(geojson_path),
             "satellite": satellites,
@@ -1711,8 +2051,17 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
             "output": str(output_root),
         },
         "total_runs": len(runs),
+        "activefire_range": {
+            "startday": combined_start.strftime("%Y%m%d"),
+            "endday": combined_end.strftime("%Y%m%d"),
+        },
         "runs": runs,
     }
+
+    if activefire_summary is not None:
+        result["activefire"] = activefire_summary
+
+    return result
 
 
 def run_pipeline_from_config(config_path: Path) -> Dict[str, Any]:

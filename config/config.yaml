@@ -1,17 +1,16 @@
 # Core inputs
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
-geojson: ./config/kyoto.geojson
-startday: [20230306]
-endday:   [20230410]
+geojson: ./config/akita.geojson
+startday: [20240421, 20240511]
+endday:   [20240421, 20240511]
 # 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
 
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
 # FIRMS active fire targets are recommended to be set in firms.activefire_satellite
 satellite:
-  - viirs
-  - modis
+  - sentinel2
 
 # Output root directory
 # 出力は各衛星ごとに以下を作成:
@@ -64,9 +63,15 @@ firms:
   api_key: ""
   base_url: "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
   # true の場合、取得結果を最後にAOIポリゴンで切り抜く
-  clip_to_aoi: true
+  clip_to_aoi: false
   # FIRMS取得用のBBOXをAOIから上下左右に広げる距離[m]
-  bbox_buffer_m: 500
+  bbox_buffer_m: 5000
+  # true の場合、active fire を Sentinel-2準拠グリッドのTIFでも出力
+  pixel_tif: true
+  # pixel_tif の解像度[m]（Sentinel-2に合わせる場合は10を推奨）
+  pixel_resolution: 10
+  # true の場合、検知フットプリントがグリッド外に出るときはTIF範囲を自動拡張
+  pixel_expand_to_detections: true
   # FIRMS area API の day range は 1..5
   days: 5
   # true の場合、startday-endday 全期間の総まとめ Shapefile も1つ出力
