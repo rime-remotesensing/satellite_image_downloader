@@ -24,6 +24,7 @@
   - 単日/単期間: 文字列で指定（例: "20230307"）
   - 複数期間ループ: 配列で指定（startday/endday は同じ要素数）
     例: startday=[20230306,20230311,20230410], endday=[20230306,20230311,20230410]
+  - active fire（FIRMS）は複数期間指定時、最小startday〜最大enddayの全期間を1回で取得
 - satellite: 処理対象衛星（sentinel2, landsat89, modis, viirs）
 - band: all または at
 - num: band が at のときに取得するバンド番号配列
@@ -34,6 +35,9 @@
 - firms.activefire_satellite: active fire の取得対象（modis, viirs）
 - firms.product_map.modis: MODISの製品名（文字列または配列）
 - firms.product_map.viirs: VIIRSの製品名（文字列または配列）
+- firms.pixel_tif: active fire をピクセルベースTIFでも出力するか（true/false）
+- firms.pixel_resolution: active fire TIF の解像度[m]（既定: 10）
+- firms.pixel_expand_to_detections: 検知が参照グリッド外にある場合にTIF範囲を自動拡張するか（既定: true）
 - firms.days: FIRMS area API の取得日数（1..5）
 - firms.clip_to_aoi: FIRMS取得後にAOIポリゴンで最終切り抜きするか（true/false）
 - firms.bbox_buffer_m: FIRMS取得時にAOI BBOXを上下左右に広げる距離（m）
@@ -87,10 +91,17 @@ FIRMS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   - output/viirs/activefire/ACFR_yyyymmdd_tttt.shp
   - output/modis/activefire/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.shp
   - output/viirs/activefire/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.shp
+- Active fire（Pixel TIF, firms.pixel_tif=true の場合）:
+  - output/modis/activefire_tif/ACFR_yyyymmdd_tttt.tif
+  - output/viirs/activefire_tif/ACFR_yyyymmdd_tttt.tif
+  - output/modis/activefire_tif/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.tif
+  - output/viirs/activefire_tif/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.tif
 
 注記: FIRMS area API は1リクエストの DAY_RANGE が 1..5 です。期間が6日以上の場合は内部で5日以下に分割して取得し、期間全体を集約します。
 注記: FIRMSはAPI仕様上BBOXで取得します。`firms.bbox_buffer_m` で広めに取得し、`firms.clip_to_aoi=true` の場合は最後にAOIポリゴンで切り抜きます。
 注記: active fire出力のCRSは固定で「Sentinel-2画像のCRSに合わせる」動作です（推定できない場合は EPSG:4326 にフォールバック）。
+注記: active fireのTIFは、検知点(lat/lon)とFIRMS属性(scan/track)からフットプリント矩形を作成してラスタ化しています。
+注記: `firms.clip_to_aoi=false` かつ BBOX拡張を使う場合でも、`firms.pixel_expand_to_detections=true` ならTIFが空になりにくいよう範囲を自動拡張します。
 
 ## ローカル実行
 
