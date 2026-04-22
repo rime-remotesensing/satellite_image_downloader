@@ -816,6 +816,21 @@ def _custom_band_indices_for_cloudmask(download_band_numbers: List[int], satelli
     return positions[0], positions[1], positions[2]
 
 
+def _is_cuda_runtime_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "cuda" not in message:
+        return False
+
+    signatures = (
+        "no kernel image is available",
+        "not compatible with the current pytorch installation",
+        "invalid device function",
+        "no cuda gpus are available",
+        "cuda driver version is insufficient",
+    )
+    return any(signature in message for signature in signatures)
+
+
 def _run_cloudmask_and_mask(
     stack_path: Path,
     cloudmask_path: Path,
@@ -840,10 +855,27 @@ def _run_cloudmask_and_mask(
         predict_kwargs["patch_overlap"] = int(omnicloudmask_cfg["patch_overlap"])
     if omnicloudmask_cfg.get("batch_size") is not None:
         predict_kwargs["batch_size"] = int(omnicloudmask_cfg["batch_size"])
-    if omnicloudmask_cfg.get("device"):
-        predict_kwargs["inference_device"] = str(omnicloudmask_cfg["device"])
+    requested_device = str(omnicloudmask_cfg.get("device", "")).strip()
+    if requested_device:
+        predict_kwargs["inference_device"] = requested_device
 
-    cloudmask = predict_from_array(input_array=prep_data, **predict_kwargs)
+    try:
+        cloudmask = predict_from_array(input_array=prep_data, **predict_kwargs)
+    except RuntimeError as exc:
+        if not _is_cuda_runtime_error(exc):
+            raise
+
+        retry_kwargs = dict(predict_kwargs)
+        if str(retry_kwargs.get("inference_device", "")).lower() == "cpu":
+            raise
+
+        LOGGER.warning(
+            "OmniCloudMask CUDA inference failed (%s). Retrying on CPU.",
+            exc,
+        )
+        retry_kwargs["inference_device"] = "cpu"
+        cloudmask = predict_from_array(input_array=prep_data, **retry_kwargs)
+
     if cloudmask.ndim == 2:
         cloudmask = cloudmask[np.newaxis, :, :]
 

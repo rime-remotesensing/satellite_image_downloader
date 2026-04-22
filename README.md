@@ -111,11 +111,23 @@ python run.py --config config/config.yaml
 
 ## Docker Compose 実行
 
+初回実行時、または `env/Dockerfile` を更新した後は先に再ビルドしてください。
+
+```bash
+docker compose build downloader
+```
+
 ```bash
 docker compose run --rm downloader
 ```
 
 実行前に config/config.yaml を用途に合わせて編集してください。
+
+GPU が認識されているかは次で確認できます。
+
+```bash
+docker compose run --rm downloader python3 -c "import torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none'); print('arch_list', torch.cuda.get_arch_list() if torch.cuda.is_available() else [])"
+```
 
 補足（モデルダウンロード高速化）:
 
