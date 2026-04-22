@@ -1,11 +1,10 @@
 # Core inputs
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
-geojson: ./config/akita.geojson
-startday: [20240421, 20240511]
-endday:   [20240421, 20240511]
+geojson: ./config/shizuoka.geojson
+startday: [20250126, 20250220]
+endday:   [20250126, 20250220]
 # 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
-
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
 # FIRMS active fire targets are recommended to be set in firms.activefire_satellite
