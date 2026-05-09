@@ -103,6 +103,27 @@ DN_CONVERSION_PRESETS: Dict[str, Dict[str, float]] = {
 }
 
 
+def _parse_processing_baseline(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sentinel2_dn_add_offset(item: Item) -> float:
+    baseline = _parse_processing_baseline(item.properties.get("s2:processing_baseline"))
+    if baseline is None:
+        baseline = _parse_processing_baseline(item.properties.get("processing_baseline"))
+    if baseline is not None and baseline >= 4.0:
+        return 1000.0
+    return 0.0
+
+
 def _prepare_for_cloudmask(
     image_path: Path,
     custom_band_indices: Tuple[int, int, int],
@@ -120,6 +141,7 @@ def _apply_cloud_mask_local(
     mask_classes: List[int],
     satellite_type: str,
     snow_mask_path: Optional[Path] = None,
+    dn_add_offset: float = 0.0,
 ) -> Path:
     if satellite_type not in DN_CONVERSION_PRESETS:
         raise ValueError(f"Unsupported satellite type for reflectance conversion: {satellite_type}")
@@ -148,7 +170,10 @@ def _apply_cloud_mask_local(
                 f"Snow mask shape mismatch. image={raw_data.shape[1:]}, snow={snow_mask.shape}"
             )
 
-    data = raw_data * preset["scale"] + preset["offset"]
+    if satellite_type == "sentinel2":
+        data = (raw_data - dn_add_offset) * preset["scale"] + preset["offset"]
+    else:
+        data = raw_data * preset["scale"] + preset["offset"]
     data = np.clip(data, 0.0, 1.0)
 
     mask_target = np.isin(cloud_mask, mask_classes)
@@ -187,6 +212,7 @@ def _create_ndsi_snow_mask_local(
     download_band_numbers: List[int],
     ndsi_threshold: float = 0.4,
     red_threshold: float = 0.2,
+    dn_add_offset: float = 0.0,
 ) -> Path:
     required = SNOWMASK_REQUIRED_BANDS[satellite_key]
     missing = [b for b in required if b not in download_band_numbers]
@@ -206,9 +232,9 @@ def _create_ndsi_snow_mask_local(
         meta = src.meta.copy()
 
     if satellite_key == "sentinel2":
-        green_ref = green / 10000.0
-        red_ref = red / 10000.0
-        swir_ref = swir / 10000.0
+        green_ref = np.clip((green - dn_add_offset) / 10000.0, 0.0, 1.0)
+        red_ref = np.clip((red - dn_add_offset) / 10000.0, 0.0, 1.0)
+        swir_ref = np.clip((swir - dn_add_offset) / 10000.0, 0.0, 1.0)
     else:
         green_ref = np.clip(green * 0.0000275 - 0.2, 0.0, 1.0)
         red_ref = np.clip(red * 0.0000275 - 0.2, 0.0, 1.0)
@@ -841,6 +867,7 @@ def _run_cloudmask_and_mask(
     cloudmask_classes: List[int],
     omnicloudmask_cfg: Dict[str, Any],
     conversion_satellite_type: str,
+    conversion_dn_add_offset: float = 0.0,
 ) -> Path:
     custom_band_indices = _custom_band_indices_for_cloudmask(download_band_numbers, satellite_key)
     prep_data, prep_meta = _prepare_for_cloudmask(
@@ -900,6 +927,7 @@ def _run_cloudmask_and_mask(
         output_path=masked_stack_path,
         mask_classes=cloudmask_classes,
         satellite_type=conversion_satellite_type,
+        dn_add_offset=conversion_dn_add_offset,
     )
 
     return result_path
@@ -1165,8 +1193,10 @@ def _process_satellite_imagery(
             if satellite_key == "sentinel2":
                 prefix = "S2C"
                 conversion_sat_type = "sentinel2"
+                dn_add_offset = _sentinel2_dn_add_offset(item)
             else:
                 prefix, conversion_sat_type = _landsat_prefix(item)
+                dn_add_offset = 0.0
 
             scene_tag = re.sub(r"[^A-Za-z0-9]", "", item.id)[-24:] or "SCENE"
             scene_stem = f"{prefix}_{date_token}_{scene_tag}"
@@ -1209,6 +1239,7 @@ def _process_satellite_imagery(
                 cloudmask_classes=cloudmask_classes,
                 omnicloudmask_cfg=omnicloudmask_cfg,
                 conversion_satellite_type=conversion_sat_type,
+                conversion_dn_add_offset=dn_add_offset,
             )
             grouped_masked[group_key].append(masked_stack_path)
             grouped_cloudmask[group_key].append(cloudmask_path)
@@ -1222,6 +1253,7 @@ def _process_satellite_imagery(
                     download_band_numbers=download_info["band_numbers"],
                     ndsi_threshold=ndsi_threshold,
                     red_threshold=red_threshold,
+                    dn_add_offset=dn_add_offset,
                 )
 
                 snowmasked_stack_path = snowmasked_tmp_dir / f"{scene_stem}_snowmasked.tif"
@@ -1232,6 +1264,7 @@ def _process_satellite_imagery(
                     mask_classes=cloudmask_classes,
                     satellite_type=conversion_sat_type,
                     snow_mask_path=snowmask_path,
+                    dn_add_offset=dn_add_offset,
                 )
                 grouped_snowmasked[group_key].append(snowmasked_stack_path)
                 grouped_snowmask[group_key].append(snowmask_path)
@@ -1727,12 +1760,12 @@ def _process_activefire(
     product_map = firms_cfg.get("product_map", {})
     modis_products = _normalize_firms_products(
         product_map.get("modis"),
-        default_products=["MODIS_NRT"],
+        default_products=[],
         field_name="config.firms.product_map.modis",
     )
     viirs_products = _normalize_firms_products(
         product_map.get("viirs"),
-        default_products=["VIIRS_SNPP_NRT"],
+        default_products=[],
         field_name="config.firms.product_map.viirs",
     )
     products_by_sat = {
@@ -1927,8 +1960,8 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
             firms_cfg.get("activefire_satellite")
         )
     else:
-        # Backward compatibility: if not specified, use legacy behavior.
-        activefire_targets = [s for s in satellites if s in {"modis", "viirs"}]
+        # No active fire targets unless explicitly configured
+        activefire_targets = []
     geometry_wgs84 = _load_aoi_geometry(geojson_path)
     bbox = _bbox_from_geometry(geometry_wgs84)
 
