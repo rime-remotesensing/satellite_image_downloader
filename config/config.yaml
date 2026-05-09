@@ -1,9 +1,9 @@
 # Core inputs
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
-geojson: ./config/shizuoka.geojson
-startday: [20250126, 20250220]
-endday:   [20250126, 20250220]
+geojson: ./config/no5.geojson
+startday: [20260425]
+endday:   [20260425]
 # 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
@@ -79,9 +79,10 @@ firms:
   product_map:
     # MODIS_SP は Terra/Aqua を含む標準処理データ
     modis:
-      - MODIS_SP
+      - MODIS_NRT
     # VIIRS はセンサ別。SNPP + NOAA-20 を両方取得
     # NOAA-21 は現状 NRT 系のみ（必要なら VIIRS_NOAA21_NRT を追加）
     viirs:
-      - VIIRS_SNPP_SP
-      - VIIRS_NOAA20_SP
+      - VIIRS_SNPP_NRT
+      - VIIRS_NOAA20_NRT
+      - VIIRS_NOAA21_NRT

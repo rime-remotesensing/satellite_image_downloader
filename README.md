@@ -43,8 +43,13 @@
 - firms.bbox_buffer_m: FIRMS取得時にAOI BBOXを上下左右に広げる距離（m）
 - firms.period_summary: active fire を期間全体で1ファイルに総まとめ出力するか（true/false）
 
-補足: `firms.activefire_satellite` を未指定の場合は後方互換のため、`satellite` に含まれる modis/viirs を active fire 対象として使います。
-推奨: active fire の対象制御は `firms.activefire_satellite` を使って `satellite` から分離してください。
+補足: Sentinel-2 は `s2:processing_baseline >= 4.0` のシーンを自動判定し、反射率変換時に DN から 1000 を差し引いてから 1/10000 を適用します（ESA の RADIO_ADD_OFFSET 対応）。
+
+補足: Active fire（MODIS/VIIRS）をダウンロードするには、以下の両方を設定してください。
+1. `firms.activefire_satellite`: 処理対象の衛星を明示指定（例: [viirs, modis]）
+2. `firms.product_map.modis` / `firms.product_map.viirs`: 各衛星の製品を明示指定
+指定がない場合は active fire はダウンロードされません。
+
 補足: `product_map` は配列対応です。例として VIIRS を SNPP + NOAA-20 の両方で取得できます。
 補足: MODIS の `MODIS_SP` は Terra/Aqua を含む統合系です。VIIRS はセンサ別（例: `VIIRS_SNPP_SP`, `VIIRS_NOAA20_SP`）です。
 
