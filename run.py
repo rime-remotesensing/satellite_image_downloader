@@ -149,8 +149,8 @@ def main() -> int:
                     
                     logger.info(f"  Downloading {len(sdate_list)} dates for {region_name}/{year}...")
                     
-                    # Output to existing region directory
-                    region_output_path = str(BASE_PATH / region_name)
+                    # Output to region/year directory
+                    region_output_path = str(BASE_PATH / region_name / year)
                     
                     result = satellite_image_downloader(
                         satellite_type=["sentinel2"],
@@ -158,6 +158,8 @@ def main() -> int:
                         sdate=sdate_list,
                         edate=edate_list,
                         output_path=region_output_path,
+                        config_path="config/config.yaml",
+                        skip_satellite_subdir=True,
                     )
                     
                     result_key = f"{region_name}/{year}"

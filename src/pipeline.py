@@ -1102,6 +1102,7 @@ def _process_satellite_imagery(
     start_date: date,
     end_date: date,
     satellite_key: str,
+    skip_satellite_subdir: bool = False,
 ) -> Dict[str, Any]:
     max_cloud = config.get("max_cloud_cover", 80)
     cloudmask_classes = [int(v) for v in config.get("cloudmask", [1, 2, 3])]
@@ -1122,12 +1123,14 @@ def _process_satellite_imagery(
 
     if satellite_key == "sentinel2":
         collection = SENTINEL_COLLECTION
-        out_sat_dir = output_root / "sentinel2"
         band_map = SENTINEL_BAND_MAP
+        sat_subdir = "" if skip_satellite_subdir else "sentinel2"
     else:
         collection = LANDSAT_COLLECTION
-        out_sat_dir = output_root / "landsat89"
         band_map = LANDSAT_BAND_MAP
+        sat_subdir = "" if skip_satellite_subdir else "landsat89"
+
+    out_sat_dir = output_root / sat_subdir if sat_subdir else output_root
 
     img_dir = out_sat_dir / "img"
     masked_dir = out_sat_dir / "masked"
@@ -1923,7 +1926,7 @@ def _process_activefire(
     return summary
 
 
-def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
+def run_pipeline(config: Dict[str, Any], config_dir: Path, skip_satellite_subdir: bool = False) -> Dict[str, Any]:
     if "geojson" not in config:
         raise ValueError("config.geojson is required")
     if "startday" not in config or "endday" not in config:
@@ -1997,6 +2000,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
                 start_date=start_date,
                 end_date=end_date,
                 satellite_key="sentinel2",
+                skip_satellite_subdir=skip_satellite_subdir,
             )
 
         if "landsat89" in satellites:
@@ -2009,6 +2013,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
                 start_date=start_date,
                 end_date=end_date,
                 satellite_key="landsat89",
+                skip_satellite_subdir=skip_satellite_subdir,
             )
 
         if include_activefire and activefire_targets:
@@ -2145,6 +2150,7 @@ def satellite_image_downloader(
     edate: str | Sequence[str] | Sequence[int],
     output_path: str,
     config_path: Optional[str] = None,
+    skip_satellite_subdir: bool = False,
 ) -> Dict[str, Any]:
     runtime_config: Dict[str, Any] = {
         "satellite": list(satellite_type) if not isinstance(satellite_type, str) else satellite_type,
@@ -2164,4 +2170,4 @@ def satellite_image_downloader(
         runtime_config = base_config
         config_dir = base_config_path.parent
 
-    return run_pipeline(config=runtime_config, config_dir=config_dir)
+    return run_pipeline(config=runtime_config, config_dir=config_dir, skip_satellite_subdir=skip_satellite_subdir)
