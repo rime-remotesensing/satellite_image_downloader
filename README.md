@@ -114,6 +114,47 @@ FIRMS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 python run.py --config config/config.yaml
 ```
 
+## バッチ実行（複数リージョン・ハードコード日付）
+
+Asoプロジェクト向け：region01 ～ region10 の複数リージョンに対して、
+ハードコードされた日付でSentinel-2を一括ダウンロードします。
+
+対応データ:
+- region01～region04, region06～region10: 2024年のデータ
+- region05: 2023年、2024年、2026年のデータ
+
+### ローカル実行
+
+```bash
+python run.py --batch
+```
+
+または config を指定しない場合は自動的にバッチモード：
+
+```bash
+python run.py
+```
+
+### Docker Compose 実行
+
+初回実行時にコンテナイメージをビルド：
+
+```bash
+docker compose build downloader
+```
+
+バッチ実行（複数リージョン）：
+
+```bash
+docker compose run --rm downloader python run.py --batch
+```
+
+または単純に：
+
+```bash
+docker compose run --rm downloader
+```
+
 ## Docker Compose 実行
 
 初回実行時、または `env/Dockerfile` を更新した後は先に再ビルドしてください。
@@ -122,11 +163,27 @@ python run.py --config config/config.yaml
 docker compose build downloader
 ```
 
+バッチ実行（複数リージョン）：
+
 ```bash
-docker compose run --rm downloader
+docker compose run --rm downloader python run.py --batch
 ```
 
-実行前に config/config.yaml を用途に合わせて編集してください。
+単一config実行：
+
+```bash
+docker compose run --rm downloader python run.py --config config/config.yaml
+```
+
+### バッチ実行の補足（Aso向け）
+
+バッチ実行時は以下の設定で固定されています：
+- 出力先: `F:/sugimoto/satellite_image_downloader/output`
+- エリアファイル: `config/no1.geojson` ～ `config/no10.geojson`
+- ダウンロード日付: ハードコード済み（region01～region10対応）
+
+Docker環境でこれらのパスを変更したい場合は、
+`run.py` 内の `REGION_DOWNLOAD_DATES` と `BATCH_MODE_REGIONS` を編集してください。
 
 GPU が認識されているかは次で確認できます。
 
