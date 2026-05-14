@@ -765,7 +765,7 @@ def _download_item_stack(
             raise ValueError(f"Missing asset '{asset_key}' for item {item.id}")
 
         href = planetary_computer.sign(asset.href)
-        resampling = Resampling.nearest if "qa" in asset_key else Resampling.bilinear
+        resampling = Resampling.nearest  # Match GEE default (nearest neighbor)
 
         with rasterio.open(href) as src:
             with WarpedVRT(
@@ -1279,7 +1279,7 @@ def _process_satellite_imagery(
             composite, profile = _composite_stacks(
                 paths,
                 reducer="min",
-                resampling_method=Resampling.bilinear,
+                resampling_method=Resampling.nearest,
             )
             out_path = masked_dir / f"{prefix}_{date_token}_masked.tif"
             profile.update({
@@ -1316,7 +1316,7 @@ def _process_satellite_imagery(
                 composite, profile = _composite_stacks(
                     paths,
                     reducer="min",
-                    resampling_method=Resampling.bilinear,
+                    resampling_method=Resampling.nearest,
                 )
                 out_path = snowmasked_dir / f"{prefix}_{date_token}_snowmasked.tif"
                 profile.update({
