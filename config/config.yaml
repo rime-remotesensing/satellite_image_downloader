@@ -31,6 +31,17 @@ cloudmask: [1, 3]
 
 # Optional STAC filter
 max_cloud_cover: 80
+file_exists: skip # overwrite or skip
+
+# GEE compatibility options (Sentinel-2)
+# - output_crs: Match Get_Sentinel2.py export CRS
+# - aoi_as_bbox: Use AOI envelope like ee.Geometry.Rectangle export region
+# - snap_grid: Snap output grid to pixel-size aligned coordinates
+gee_compatible:
+  enabled: true
+  output_crs: EPSG:32652
+  aoi_as_bbox: true
+  snap_grid: true
 
 # Cloud mask inference options
 omnicloudmask:

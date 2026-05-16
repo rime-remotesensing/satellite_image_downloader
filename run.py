@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+import os
 from pathlib import Path
 
 from src.pipeline import run_pipeline_from_config, satellite_image_downloader
@@ -92,7 +93,7 @@ REGION_DOWNLOAD_DATES = {
     },
 }
 
-BASE_PATH = Path("F:/sugimoto/Aso/Sentinel-2")
+BASE_PATH = Path(os.environ.get("SATDL_HOST_DATA_PATH", "F:/sugimoto/Aso/Sentinel-2"))
 
 
 def main() -> int:
@@ -159,6 +160,7 @@ def main() -> int:
                         edate=edate_list,
                         output_path=region_output_path,
                         config_path="config/config.yaml",
+                        batch_mode=True,
                         skip_satellite_subdir=True,
                     )
                     
