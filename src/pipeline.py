@@ -407,6 +407,22 @@ def _normalize_firms_products(
     return deduped
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
 def _load_aoi_geometry(geojson_path: Path) -> Dict[str, Any]:
     with geojson_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -706,7 +722,15 @@ def _save_metadata_geojson(
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def _build_grid_for_item(item: Item, geometry_wgs84: Dict[str, Any], target_resolution: float) -> Tuple[Any, Affine, int, int, Dict[str, Any]]:
+def _build_grid_for_item(
+    item: Item,
+    geometry_wgs84: Dict[str, Any],
+    target_resolution: float,
+    *,
+    output_crs_override: Optional[str] = None,
+    use_bbox_extent: bool = False,
+    snap_to_resolution_grid: bool = False,
+) -> Tuple[Any, Affine, int, int, Dict[str, Any]]:
     first_asset = None
     for asset in item.assets.values():
         if asset.media_type and "image" not in asset.media_type:
@@ -722,15 +746,51 @@ def _build_grid_for_item(item: Item, geometry_wgs84: Dict[str, Any], target_reso
         if src.crs is None:
             raise ValueError(f"Asset has no CRS: {first_asset.href}")
 
-        geom_in_item_crs = transform_geom("EPSG:4326", src.crs.to_string(), geometry_wgs84, precision=6)
+        target_crs = src.crs
+        if output_crs_override:
+            target_crs = rasterio.crs.CRS.from_string(output_crs_override)
+
+        if use_bbox_extent:
+            west, south, east, north = _bbox_from_geometry(geometry_wgs84)
+            bbox_geom_wgs84 = {
+                "type": "Polygon",
+                "coordinates": [[
+                    [west, south],
+                    [east, south],
+                    [east, north],
+                    [west, north],
+                    [west, south],
+                ]],
+            }
+            geom_in_item_crs = transform_geom(
+                "EPSG:4326",
+                target_crs.to_string(),
+                bbox_geom_wgs84,
+                precision=6,
+            )
+        else:
+            geom_in_item_crs = transform_geom(
+                "EPSG:4326",
+                target_crs.to_string(),
+                geometry_wgs84,
+                precision=6,
+            )
+
         left, bottom, right, top = geometry_bounds(geom_in_item_crs)
+
+        if snap_to_resolution_grid:
+            left = math.floor(left / target_resolution) * target_resolution
+            bottom = math.floor(bottom / target_resolution) * target_resolution
+            right = math.ceil(right / target_resolution) * target_resolution
+            top = math.ceil(top / target_resolution) * target_resolution
+
         width = max(1, int(math.ceil((right - left) / target_resolution)))
         height = max(1, int(math.ceil((top - bottom) / target_resolution)))
         transform = from_origin(left, top, target_resolution, target_resolution)
         profile_template = {
             "driver": "GTiff",
             "dtype": "float32",
-            "crs": src.crs,
+            "crs": target_crs,
             "transform": transform,
             "width": width,
             "height": height,
@@ -748,11 +808,18 @@ def _download_item_stack(
     band_map: Dict[int, Tuple[str, str]],
     download_band_numbers: List[int],
     output_stack_path: Path,
+    *,
+    output_crs_override: Optional[str] = None,
+    use_bbox_extent: bool = False,
+    snap_to_resolution_grid: bool = False,
 ) -> Dict[str, Any]:
     geom_in_crs, transform, width, height, profile_template = _build_grid_for_item(
         item=item,
         geometry_wgs84=geometry_wgs84,
         target_resolution=target_resolution,
+        output_crs_override=output_crs_override,
+        use_bbox_extent=use_bbox_extent,
+        snap_to_resolution_grid=snap_to_resolution_grid,
     )
 
     arrays: List[np.ndarray] = []
@@ -1105,6 +1172,9 @@ def _process_satellite_imagery(
     skip_satellite_subdir: bool = False,
 ) -> Dict[str, Any]:
     max_cloud = config.get("max_cloud_cover", 80)
+    file_exists_mode = str(config.get("file_exists", "overwrite")).strip().lower()
+    if file_exists_mode not in {"overwrite", "skip"}:
+        raise ValueError("config.file_exists must be 'overwrite' or 'skip'")
     cloudmask_classes = [int(v) for v in config.get("cloudmask", [1, 2, 3])]
     omnicloudmask_cfg = config.get("omnicloudmask", {})
     snowmask_cfg = config.get("snowmask", {})
@@ -1113,6 +1183,18 @@ def _process_satellite_imagery(
     red_threshold = float(snowmask_cfg.get("red_threshold", 0.2))
     metadata_cfg = config.get("metadata", {})
     metadata_enabled = bool(metadata_cfg.get("enabled", True))
+
+    gee_cfg = config.get("gee_compatible", {})
+    gee_enabled = _as_bool(gee_cfg.get("enabled"), default=False)
+
+    output_crs_override: Optional[str] = None
+    use_bbox_extent = False
+    snap_to_resolution_grid = False
+    if satellite_key == "sentinel2" and gee_enabled:
+        output_crs_raw = str(gee_cfg.get("output_crs", "")).strip()
+        output_crs_override = output_crs_raw or None
+        use_bbox_extent = _as_bool(gee_cfg.get("aoi_as_bbox"), default=True)
+        snap_to_resolution_grid = _as_bool(gee_cfg.get("snap_grid"), default=True)
 
     download_band_numbers, _ = _resolve_band_request(
         config,
@@ -1205,6 +1287,16 @@ def _process_satellite_imagery(
             scene_stem = f"{prefix}_{date_token}_{scene_tag}"
             img_stack_path = img_dir / f"{scene_stem}.tif"
 
+            # Skip processing if configured to skip and the image already exists
+            if file_exists_mode == "skip" and img_stack_path.exists():
+                LOGGER.info(
+                    "Skipping existing scene %s for date %s (img exists: %s)",
+                    item.id,
+                    date_token,
+                    img_stack_path,
+                )
+                continue
+
             download_info = _download_item_stack(
                 item=item,
                 geometry_wgs84=geometry_wgs84,
@@ -1212,6 +1304,9 @@ def _process_satellite_imagery(
                 band_map=band_map,
                 download_band_numbers=download_band_numbers,
                 output_stack_path=img_stack_path,
+                output_crs_override=output_crs_override,
+                use_bbox_extent=use_bbox_extent,
+                snap_to_resolution_grid=snap_to_resolution_grid,
             )
 
             if reference_raster_path is None:
@@ -2151,6 +2246,8 @@ def satellite_image_downloader(
     output_path: str,
     config_path: Optional[str] = None,
     skip_satellite_subdir: bool = False,
+    *,
+    batch_mode: bool = False,
 ) -> Dict[str, Any]:
     runtime_config: Dict[str, Any] = {
         "satellite": list(satellite_type) if not isinstance(satellite_type, str) else satellite_type,
@@ -2158,8 +2255,6 @@ def satellite_image_downloader(
         "startday": sdate,
         "endday": edate,
         "output": output_path,
-        "band": "all",
-        "cloudmask": [1, 2, 3],
     }
 
     config_dir = Path.cwd()
@@ -2169,5 +2264,10 @@ def satellite_image_downloader(
         base_config.update(runtime_config)
         runtime_config = base_config
         config_dir = base_config_path.parent
+
+    # In batch mode we may want to ignore cloud cover filtering to ensure
+    # hardcoded required dates are processed even if eo:cloud_cover is high.
+    if batch_mode:
+        runtime_config["max_cloud_cover"] = None
 
     return run_pipeline(config=runtime_config, config_dir=config_dir, skip_satellite_subdir=skip_satellite_subdir)
