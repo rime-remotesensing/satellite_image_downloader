@@ -93,7 +93,13 @@ REGION_DOWNLOAD_DATES = {
     },
 }
 
-BASE_PATH = Path(os.environ.get("SATDL_HOST_DATA_PATH", "F:/sugimoto/Aso/Sentinel-2"))
+BASE_PATH = Path(os.environ.get("SATDL_HOST_DATA_PATH", "D:/sugimoto/Aso/Sentinel-2"))
+BASE_PATH = Path(
+    os.environ.get(
+        "SATDL_BASE_PATH",
+        os.environ.get("SATDL_HOST_DATA_PATH", "/host_data") + "/Aso/Sentinel-2",
+    )
+)
 
 
 def main() -> int:
@@ -170,10 +176,10 @@ def main() -> int:
                         "dates_processed": len(sdate_list),
                         "total_runs": result.get("total_runs", 0),
                     }
-                    logger.info(f"  ✓ {region_name}/{year} completed")
+                    logger.info(f"  ✁E{region_name}/{year} completed")
                     
                 except Exception as exc:
-                    logger.error(f"  ✗ {region_name}/{year} failed: {exc}", exc_info=True)
+                    logger.error(f"  ✁E{region_name}/{year} failed: {exc}", exc_info=True)
                     all_results[f"{region_name}/{year}"] = {
                         "status": "failed",
                         "error": str(exc),
