@@ -146,7 +146,7 @@ docker compose build downloader
 バッチ実行（複数リージョン）：
 
 ```bash
-docker compose run --rm downloader python run.py --batch
+docker compose run --rm downloader python3 run.py --batch
 ```
 
 または単純に：
@@ -166,13 +166,13 @@ docker compose build downloader
 バッチ実行（複数リージョン）：
 
 ```bash
-docker compose run --rm downloader python run.py --batch
+docker compose run --rm downloader python3 run.py --batch
 ```
 
 単一config実行：
 
 ```bash
-docker compose run --rm downloader python run.py --config config/config.yaml
+docker compose run --rm downloader python3 run.py --config config/config.yaml
 ```
 
 ### バッチ実行の補足（Aso向け）
@@ -184,6 +184,25 @@ docker compose run --rm downloader python run.py --config config/config.yaml
 
 Docker環境でこれらのパスを変更したい場合は、
 `run.py` 内の `REGION_DOWNLOAD_DATES` と `BATCH_MODE_REGIONS` を編集してください。
+
+### Docker 実行時の注意
+
+- コンテナ内イメージによっては `python` コマンドが存在せず `python3` を使う必要があります。上の実行例は `python3` を想定しています。
+- ホスト側の任意パスへ出力させたい場合は環境変数で指定します。
+
+例（Windows PowerShell、ホストの `D:/sugimoto` をコンテナへマウントした上で出力先を指定）:
+
+```powershell
+$env:SATDL_HOST_DATA_PATH = 'D:/sugimoto'
+docker compose run --rm -e SATDL_BASE_PATH=/host_data/Aso/Sentinel-2 downloader python3 run.py --batch
+```
+
+説明:
+- `SATDL_HOST_DATA_PATH` は `docker-compose.yml` のボリューム置換に使われ、ホストのパスをコンテナ内の `/host_data` にマウントします。
+- `SATDL_BASE_PATH` を渡すと `run.py` の `BASE_PATH` を明示的に上書きできます（優先されます）。
+- これにより、出力はコンテナ経由でホストの `D:/sugimoto/Aso/Sentinel-2/...` に保存されます。
+
+永続的に `python3` を使う設定にしたい場合は、`docker-compose.yml` の `command` を `python3` に変更してください。
 
 GPU が認識されているかは次で確認できます。
 

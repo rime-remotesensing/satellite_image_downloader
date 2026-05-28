@@ -187,7 +187,7 @@ def _apply_cloud_mask_local(
         for band_idx in range(data.shape[0]):
             data[band_idx][nodata_mask] = np.nan
 
-    # Swath外などの全バンド0画素は観測外とみなして除外
+    # Swath外などの全バンチE画素は観測外とみなして除夁E
     all_zero_mask = np.all(raw_data == 0, axis=0)
     if all_zero_mask.any():
         for band_idx in range(data.shape[0]):
@@ -1295,6 +1295,21 @@ def _process_satellite_imagery(
                     date_token,
                     img_stack_path,
                 )
+            # group key for grouping outputs by prefix/date
+            group_key = (prefix, date_token)
+
+            # If a per-scene masked output already exists, skip re-processing this scene.
+            # Prefer masked temporary output, then final masked output.
+            cloudmask_path = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
+            masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
+            final_masked_path = masked_dir / f"{scene_stem}_masked.tif"
+            if masked_stack_path.exists() or final_masked_path.exists():
+                LOGGER.info("Skipping scene %s: masked output already exists", scene_stem)
+                # Add existing paths to grouped lists so later compositing can use them
+                grouped_masked[group_key].append(masked_stack_path if masked_stack_path.exists() else final_masked_path)
+                if cloudmask_path.exists():
+                    grouped_cloudmask[group_key].append(cloudmask_path)
+                processed_items += 1
                 continue
 
             download_info = _download_item_stack(
