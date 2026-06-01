@@ -263,7 +263,6 @@ output/
 
 ```text
 output/sentinel2/img/S2C_20260425_<scene_id>.tif
-output/sentinel2/img/S2C_20260425_<scene_id>.json
 output/sentinel2/masked/S2C_20260425_masked.tif
 output/sentinel2/snowmasked/S2C_20260425_snowmasked.tif
 output/sentinel2/cloudmask/S2C_20260425_cloudmask.tif
