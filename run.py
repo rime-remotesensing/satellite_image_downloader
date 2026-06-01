@@ -171,11 +171,20 @@ def main() -> int:
                     )
                     
                     result_key = f"{region_name}/{year}"
+                    failed_items = int(result.get("failed_items", 0))
                     all_results[result_key] = {
-                        "status": "success",
+                        "status": "partial" if failed_items else "success",
                         "dates_processed": len(sdate_list),
                         "total_runs": result.get("total_runs", 0),
+                        "failed_items": failed_items,
                     }
+                    if failed_items:
+                        logger.warning(
+                            "  %s/%s completed with %s failed scene(s)",
+                            region_name,
+                            year,
+                            failed_items,
+                        )
                     logger.info(f"  ✁E{region_name}/{year} completed")
                     
                 except Exception as exc:
