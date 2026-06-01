@@ -1,267 +1,410 @@
 # satellite_image_downloader
 
-## 概要
+Microsoft Planetary Computer と NASA FIRMS から、指定した範囲・期間の衛星画像と active fire データを取得する Python パイプラインです。
 
-このリポジトリは、設定ファイル駆動で動作する衛星画像処理パイプラインです。主な処理フローは次の通りです。
+主な処理は次の通りです。
 
-1. Microsoft Planetary Computer STAC から Sentinel-2 L2A / Landsat 8・9 L2 を検索
-2. GeoJSON の AOI で切り出し、スタック済み TIFF（マルチバンド）を保存
-3. インストール済みの omnicloudmask パッケージで雲マスクを生成
-4. 雲マスク適用、および設定に応じて雪マスク適用
-5. FIRMS の active fire データを取得し、Shapefile で保存
+1. GeoJSON で指定した AOI を読み込む
+2. Microsoft Planetary Computer STAC から Sentinel-2 L2A または Landsat 8/9 L2 を検索する
+3. AOI に合わせて GeoTIFF を切り出し、複数バンドのスタック画像として保存する
+4. omnicloudmask で雲マスクを作成し、雲・影を除いた画像を保存する
+5. 任意で NDSI による雪マスクを作成し、雲＋雪を除いた画像を保存する
+6. 任意で NASA FIRMS から MODIS / VIIRS active fire を取得し、Shapefile と GeoTIFF で保存する
 
-## プロジェクト構成
+## できること
 
-- run.py: パイプライン実行エントリポイント（設定ファイル駆動）
-- config/config.yaml: 実行設定
-- config/area.geojson: AOI サンプル
-- src/pipeline.py: ダウンロード・前処理・出力の統合ロジック
+- Sentinel-2 L2A のダウンロード
+- Landsat 8 / 9 Collection 2 Level-2 のダウンロード
+- AOI GeoJSON による切り出し
+- バンド指定、または全バンド取得
+- 雲マスク、雲除去済み画像の作成
+- 雪マスク、雲＋雪除去済み画像の作成
+- 撮影メタデータ GeoJSON の保存
+- FIRMS active fire の Shapefile / raster GeoTIFF 出力
+- 設定ファイル実行、バッチ実行、Python API からの実行
+- Docker Compose 実行
 
-## 入力設定
+## ディレクトリ構成
 
-- geojson: Polygon / MultiPolygon の GeoJSON パス
-- startday, endday: 対象期間（YYYYMMDD）
-  - 単日/単期間: 文字列で指定（例: "20230307"）
-  - 複数期間ループ: 配列で指定（startday/endday は同じ要素数）
-    例: startday=[20230306,20230311,20230410], endday=[20230306,20230311,20230410]
-  - active fire（FIRMS）は複数期間指定時、最小startday〜最大enddayの全期間を1回で取得
-- satellite: 処理対象衛星（sentinel2, landsat89, modis, viirs）
-- band: all または at
-- num: band が at のときに取得するバンド番号配列
-- cloudmask: マスク対象クラス（1, 2, 3）
-- snowmask.enabled: 雪マスク処理を行うかどうか（true/false）
-- metadata.enabled: 撮影メタデータGeoJSONを保存するかどうか（true/false）
-- firms.key_env_path: FIRMS APIキーを保存した `key.env` のパス
-- firms.activefire_satellite: active fire の取得対象（modis, viirs）
-- firms.product_map.modis: MODISの製品名（文字列または配列）
-- firms.product_map.viirs: VIIRSの製品名（文字列または配列）
-- firms.pixel_tif: active fire をピクセルベースTIFでも出力するか（true/false）
-- firms.pixel_resolution: active fire TIF の解像度[m]（既定: 10）
-- firms.pixel_expand_to_detections: 検知が参照グリッド外にある場合にTIF範囲を自動拡張するか（既定: true）
-- firms.days: FIRMS area API の取得日数（1..5）
-- firms.clip_to_aoi: FIRMS取得後にAOIポリゴンで最終切り抜きするか（true/false）
-- firms.bbox_buffer_m: FIRMS取得時にAOI BBOXを上下左右に広げる距離（m）
-- firms.period_summary: active fire を期間全体で1ファイルに総まとめ出力するか（true/false）
-
-補足: Sentinel-2 は `s2:processing_baseline >= 4.0` のシーンを自動判定し、反射率変換時に DN から 1000 を差し引いてから 1/10000 を適用します（ESA の RADIO_ADD_OFFSET 対応）。
-
-補足: Active fire（MODIS/VIIRS）をダウンロードするには、以下の両方を設定してください。
-1. `firms.activefire_satellite`: 処理対象の衛星を明示指定（例: [viirs, modis]）
-2. `firms.product_map.modis` / `firms.product_map.viirs`: 各衛星の製品を明示指定
-指定がない場合は active fire はダウンロードされません。
-
-補足: `product_map` は配列対応です。例として VIIRS を SNPP + NOAA-20 の両方で取得できます。
-補足: MODIS の `MODIS_SP` は Terra/Aqua を含む統合系です。VIIRS はセンサ別（例: `VIIRS_SNPP_SP`, `VIIRS_NOAA20_SP`）です。
-
-## FIRMS APIキーの取得と設定
-
-FIRMS APIキー（MAP_KEY）は以下で取得してください。
-
-- https://firms.modaps.eosdis.nasa.gov/api/
-
-取得したキーは `config/config.yaml` へ直接書かず、`key.env` に保存してください。
-
-`key.env` の例:
-
-```bash
-FIRMS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```text
+satellite_image_downloader/
+├─ run.py                  # 実行入口
+├─ src/pipeline.py          # パイプライン本体
+├─ config/config.yaml       # 実行設定
+├─ env/requirements.txt     # Python 依存パッケージ
+├─ env/Dockerfile           # Docker イメージ定義
+├─ docker-compose.yml       # Docker Compose 設定
+├─ scripts/                 # 補助スクリプト
+└─ data/                    # Docker 実行時などのデータ置き場
 ```
 
-`config/config.yaml` では `firms.key_env_path` を指定します（既定値: `./key.env`）。
+## まず動かす
 
-## 出力
+### 1. AOI GeoJSON を用意する
 
-注記: img 以外（masked / snowmasked / cloudmask）は同日コンポジット後の結果を保存します。
-注記: metadata.enabled=true の場合、img 配下に撮影メタデータ GeoJSON を保存します。
+`config/config.yaml` の `geojson` に、対象範囲の GeoJSON を指定します。
 
-- Acquisition_Date
-- Image_ID
-- Solar_Azimuth_Angle
-- Solar_Zenith_Angle
+```yaml
+geojson: ./config/no5.geojson
+```
 
-- Sentinel-2 出力:
-  - output/sentinel2/img: 生データ（スタック、シーン単位）
-  - output/sentinel2/img/<start_yyyymmdd>-<end_yyyymmdd>.geojson: 撮影メタデータ
-  - output/sentinel2/masked: 雲マスク適用済み（同日コンポジット）
-  - output/sentinel2/snowmasked: 雲+雪マスク適用済み（同日コンポジット、snowmask.enabled=true の場合）
-  - output/sentinel2/cloudmask: 雲マスクと雪マスク（同日コンポジット）
-- Landsat 8/9 出力:
-  - output/landsat89/img: 生データ（スタック、シーン単位）
-  - output/landsat89/img/<start_yyyymmdd>-<end_yyyymmdd>.geojson: 撮影メタデータ
-  - output/landsat89/masked: 雲マスク適用済み（同日コンポジット）
-  - output/landsat89/snowmasked: 雲+雪マスク適用済み（同日コンポジット、snowmask.enabled=true の場合）
-  - output/landsat89/cloudmask: 雲マスクと雪マスク（同日コンポジット）
-- Active fire（Shapefile）:
-  - output/modis/activefire/ACFR_yyyymmdd_tttt.shp
-  - output/viirs/activefire/ACFR_yyyymmdd_tttt.shp
-  - output/modis/activefire/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.shp
-  - output/viirs/activefire/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.shp
-- Active fire（Pixel TIF, firms.pixel_tif=true の場合）:
-  - output/modis/activefire_tif/ACFR_yyyymmdd_tttt.tif
-  - output/viirs/activefire_tif/ACFR_yyyymmdd_tttt.tif
-  - output/modis/activefire_tif/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.tif
-  - output/viirs/activefire_tif/ACFR_<start_yyyymmdd>_<end_yyyymmdd>_tttt.tif
+GeoJSON は `Polygon` または `MultiPolygon` を想定しています。
 
-注記: FIRMS area API は1リクエストの DAY_RANGE が 1..5 です。期間が6日以上の場合は内部で5日以下に分割して取得し、期間全体を集約します。
-注記: FIRMSはAPI仕様上BBOXで取得します。`firms.bbox_buffer_m` で広めに取得し、`firms.clip_to_aoi=true` の場合は最後にAOIポリゴンで切り抜きます。
-注記: active fire出力のCRSは固定で「Sentinel-2画像のCRSに合わせる」動作です（推定できない場合は EPSG:4326 にフォールバック）。
-注記: active fireのTIFは、検知点(lat/lon)とFIRMS属性(scan/track)からフットプリント矩形を作成してラスタ化しています。
-注記: `firms.clip_to_aoi=false` かつ BBOX拡張を使う場合でも、`firms.pixel_expand_to_detections=true` ならTIFが空になりにくいよう範囲を自動拡張します。
+### 2. 期間を指定する
 
-## ローカル実行
+1期間だけ実行する場合は、`YYYYMMDD` 形式で指定します。
+
+```yaml
+startday: [20260425]
+endday:   [20260425]
+```
+
+複数日をまとめて処理したい場合は、`startday` と `endday` に同じ数の要素を入れます。
+
+```yaml
+startday: [20240116, 20240126, 20240220]
+endday:   [20240116, 20240126, 20240220]
+```
+
+複数期間を指定した場合、衛星画像は期間ごとに処理されます。FIRMS active fire は、最小 `startday` から最大 `endday` までの全期間をまとめて取得します。
+
+### 3. 対象衛星を指定する
+
+```yaml
+satellite:
+  - sentinel2
+```
+
+指定できる値は次の通りです。
+
+| 値 | 内容 |
+| --- | --- |
+| `sentinel2` | Sentinel-2 Level-2A |
+| `landsat89` | Landsat 8 / 9 Collection 2 Level-2 |
+
+active fire は `satellite` ではなく、`firms.activefire_satellite` で指定します。
+
+### 4. 実行する
 
 ```bash
 python run.py --config config/config.yaml
 ```
 
-## バッチ実行（複数リージョン・ハードコード日付）
+実行が終わると、処理結果の概要が JSON で表示されます。
 
-Asoプロジェクト向け：region01 ～ region10 の複数リージョンに対して、
-ハードコードされた日付でSentinel-2を一括ダウンロードします。
+## 設定ファイルの主な項目
 
-対応データ:
-- region01～region04, region06～region10: 2024年のデータ
-- region05: 2023年、2024年、2026年のデータ
+`config/config.yaml` を編集して、入力、出力、マスク処理、FIRMS 取得条件を変更します。
 
-### ローカル実行
+| 項目 | 例 | 説明 |
+| --- | --- | --- |
+| `geojson` | `./config/no5.geojson` | AOI GeoJSON のパス |
+| `startday` | `[20260425]` | 開始日。`YYYYMMDD` のリスト |
+| `endday` | `[20260425]` | 終了日。`startday` と同じ要素数にする |
+| `satellite` | `[sentinel2]` | 取得する衛星画像 |
+| `output` | `./output` | 出力先ルート |
+| `band` | `all` | `all` または `at` |
+| `num` | `[1, 2, 3]` | `band: at` のときに取得するバンド番号 |
+| `cloudmask` | `[1, 3]` | マスクする omnicloudmask クラス |
+| `max_cloud_cover` | `80` | STAC 検索時の雲量上限。不要なら `null` |
+| `file_exists` | `skip` | 既存ファイルがある場合の動作。`skip` または `overwrite` |
+| `metadata.enabled` | `true` | 撮影メタデータ GeoJSON を保存するか |
+
+### バンド指定
+
+全バンドを取得する場合:
+
+```yaml
+band: all
+num: []
+```
+
+特定バンドだけを出力したい場合:
+
+```yaml
+band: at
+num: [2, 3, 4, 8]
+```
+
+注意: 雲マスクや雪マスクに必要なバンドは、`num` に含まれていなくても内部処理のために自動でダウンロードされます。ただし、最終的に `img/` に個別出力されるのは `num` で指定したバンドです。
+
+### 雲マスク
+
+```yaml
+cloudmask: [1, 3]
+```
+
+omnicloudmask のクラスのうち、どれを無効値にするかを指定します。
+
+| クラス | 意味 |
+| --- | --- |
+| `1` | thick cloud |
+| `2` | thin cloud |
+| `3` | shadow |
+
+通常は `[1, 3]` または `[1, 2, 3]` を使います。
+
+### 雪マスク
+
+```yaml
+snowmask:
+  enabled: true
+  ndsi_threshold: 0.4
+  red_threshold: 0.2
+```
+
+`enabled: true` の場合、NDSI による雪マスクを作り、`snowmasked/` に雲＋雪マスク済み画像を出力します。
+
+### GEE 互換設定
+
+Sentinel-2 で Google Earth Engine のエクスポートに近い格子に合わせたい場合に使います。
+
+```yaml
+gee_compatible:
+  enabled: true
+  output_crs: EPSG:32652
+  aoi_as_bbox: true
+  snap_grid: true
+```
+
+| 項目 | 説明 |
+| --- | --- |
+| `enabled` | GEE 互換設定を使うか |
+| `output_crs` | 出力 CRS |
+| `aoi_as_bbox` | AOI の外接矩形で切り出すか |
+| `snap_grid` | ピクセルサイズに合わせてグリッドを丸めるか |
+
+## FIRMS active fire を使う場合
+
+FIRMS active fire を取得するには、NASA FIRMS の API キーが必要です。
+
+API キーは次のページから取得します。
+
+https://firms.modaps.eosdis.nasa.gov/api/
+
+取得したキーは、リポジトリ直下などに `key.env` として保存します。
+
+```bash
+FIRMS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+`config/config.yaml` では、次のように指定します。
+
+```yaml
+firms:
+  activefire_satellite:
+    - viirs
+    - modis
+  key_env_path: ./key.env
+  pixel_tif: true
+  period_summary: true
+  product_map:
+    modis:
+      - MODIS_NRT
+    viirs:
+      - VIIRS_SNPP_NRT
+      - VIIRS_NOAA20_NRT
+      - VIIRS_NOAA21_NRT
+```
+
+| 項目 | 説明 |
+| --- | --- |
+| `activefire_satellite` | `modis`、`viirs` のどちらを取得するか |
+| `key_env_path` | API キーを書いた `.env` ファイル |
+| `api_key` | 直接 API キーを書く場合の項目。通常は空でよい |
+| `clip_to_aoi` | 取得後に AOI ポリゴンで絞り込むか |
+| `bbox_buffer_m` | FIRMS 取得用 BBOX を AOI から何 m 広げるか |
+| `pixel_tif` | active fire を raster GeoTIFF でも出力するか |
+| `pixel_resolution` | active fire GeoTIFF の解像度 m |
+| `pixel_expand_to_detections` | 検知点がグリッド外に出た場合に出力範囲を広げるか |
+| `days` | FIRMS API の1リクエストあたり日数。1から5 |
+| `period_summary` | 期間全体をまとめた Shapefile / GeoTIFF を出すか |
+| `product_map.modis` | MODIS の FIRMS product |
+| `product_map.viirs` | VIIRS の FIRMS product |
+
+API キーが見つからない場合、active fire の取得はスキップされます。衛星画像の処理は継続します。
+
+## 出力
+
+`output` に指定したディレクトリの下に、衛星またはデータ種別ごとのフォルダが作られます。
+
+通常の設定ファイル実行では、次のような構成です。
+
+```text
+output/
+├─ sentinel2/
+│  ├─ img/
+│  ├─ masked/
+│  ├─ snowmasked/
+│  └─ cloudmask/
+├─ landsat89/
+│  ├─ img/
+│  ├─ masked/
+│  ├─ snowmasked/
+│  └─ cloudmask/
+├─ modis/
+│  ├─ activefire/
+│  └─ activefire_tif/
+└─ viirs/
+   ├─ activefire/
+   └─ activefire_tif/
+```
+
+### 衛星画像
+
+| フォルダ | 内容 |
+| --- | --- |
+| `img/` | AOI で切り出したスタック GeoTIFF。撮影シーン単位 |
+| `masked/` | 雲・影をマスクした日別コンポジット GeoTIFF |
+| `snowmasked/` | 雲・影・雪をマスクした日別コンポジット GeoTIFF |
+| `cloudmask/` | 日別コンポジットの雲マスク、雪マスク |
+
+主なファイル名の例:
+
+```text
+output/sentinel2/img/S2C_20260425_<scene_id>.tif
+output/sentinel2/img/S2C_20260425_<scene_id>.json
+output/sentinel2/masked/S2C_20260425_masked.tif
+output/sentinel2/snowmasked/S2C_20260425_snowmasked.tif
+output/sentinel2/cloudmask/S2C_20260425_cloudmask.tif
+output/sentinel2/cloudmask/S2C_20260425_snowmask.tif
+```
+
+`metadata.enabled: true` の場合、`img/` の下に撮影メタデータ GeoJSON も保存されます。
+
+```text
+output/sentinel2/img/20260425-20260425.geojson
+```
+
+メタデータには主に次の情報が入ります。
+
+- `Acquisition_Date`
+- `Image_ID`
+- `Solar_Azimuth_Angle`
+- `Solar_Zenith_Angle`
+
+### Active Fire
+
+```text
+output/modis/activefire/ACFR_20260425_1234.shp
+output/viirs/activefire/ACFR_20260425_1234.shp
+output/modis/activefire_tif/ACFR_20260425_1234.tif
+output/viirs/activefire_tif/ACFR_20260425_1234.tif
+```
+
+`period_summary: true` の場合、期間全体をまとめたファイルも出力されます。
+
+```text
+output/viirs/activefire/ACFR_20260401_20260425_1234.shp
+output/viirs/activefire_tif/ACFR_20260401_20260425_1234.tif
+```
+
+末尾の `1234` は実行時刻 UTC の `HHMM` です。
+
+## 実行方法
+
+### 設定ファイルで実行
+
+最も基本的な実行方法です。
+
+```bash
+python run.py --config config/config.yaml
+```
+
+### バッチ実行
+
+`run.py` に定義されている `region01` から `region10` と、ハードコード済みの日付リストを使って Sentinel-2 を一括取得します。
 
 ```bash
 python run.py --batch
 ```
 
-または config を指定しない場合は自動的にバッチモード：
+`--config` を指定せずに実行した場合も、現在の実装ではバッチ実行になります。
 
 ```bash
 python run.py
 ```
 
-### Docker Compose 実行
+バッチ実行で使われる AOI と日付は、`run.py` の次の変数で定義されています。
 
-初回実行時にコンテナイメージをビルド：
+- `BATCH_MODE_REGIONS`
+- `REGION_DOWNLOAD_DATES`
+
+出力先の基準パスは `SATDL_BASE_PATH` または `SATDL_HOST_DATA_PATH` で変更できます。指定しない場合、Docker 内では `/host_data/Aso/Sentinel-2` が使われます。
+
+PowerShell の例:
+
+```powershell
+$env:SATDL_BASE_PATH = "D:/sugimoto/Aso/Sentinel-2"
+python run.py --batch
+```
+
+## Docker Compose で実行
+
+ローカル Python 環境を作らずに実行したい場合は Docker Compose を使います。
+
+### 1. イメージをビルド
 
 ```bash
 docker compose build downloader
 ```
 
-バッチ実行（複数リージョン）：
-
-```bash
-docker compose run --rm downloader python3 run.py --batch
-```
-
-または単純に：
-
-```bash
-docker compose run --rm downloader
-```
-
-## Docker Compose 実行
-
-初回実行時、または `env/Dockerfile` を更新した後は先に再ビルドしてください。
-
-```bash
-docker compose build downloader
-```
-
-バッチ実行（複数リージョン）：
-
-```bash
-docker compose run --rm downloader python3 run.py --batch
-```
-
-単一config実行：
+### 2. 設定ファイルで実行
 
 ```bash
 docker compose run --rm downloader python3 run.py --config config/config.yaml
 ```
 
-### バッチ実行の補足（Aso向け）
+または、`docker-compose.yml` の `command` を使って実行します。
 
-バッチ実行時は以下の設定で固定されています：
-- 出力先: `F:/sugimoto/satellite_image_downloader/output`
-- エリアファイル: `config/no1.geojson` ～ `config/no10.geojson`
-- ダウンロード日付: ハードコード済み（region01～region10対応）
+```bash
+docker compose run --rm downloader
+```
 
-Docker環境でこれらのパスを変更したい場合は、
-`run.py` 内の `REGION_DOWNLOAD_DATES` と `BATCH_MODE_REGIONS` を編集してください。
+### 3. バッチ実行
 
-### Docker 実行時の注意
+```bash
+docker compose run --rm downloader python3 run.py --batch
+```
 
-- コンテナ内イメージによっては `python` コマンドが存在せず `python3` を使う必要があります。上の実行例は `python3` を想定しています。
-- ホスト側の任意パスへ出力させたい場合は環境変数で指定します。
+### ホスト側のデータフォルダを指定する
 
-例（Windows PowerShell、ホストの `D:/sugimoto` をコンテナへマウントした上で出力先を指定）:
+Docker コンテナ内では、ホストのフォルダが `/host_data` にマウントされます。ホスト側のフォルダは `SATDL_HOST_DATA_PATH` で指定できます。
+
+PowerShell の例:
 
 ```powershell
-$env:SATDL_HOST_DATA_PATH = 'D:/sugimoto'
+$env:SATDL_HOST_DATA_PATH = "D:/sugimoto"
 docker compose run --rm -e SATDL_BASE_PATH=/host_data/Aso/Sentinel-2 downloader python3 run.py --batch
 ```
 
-説明:
-- `SATDL_HOST_DATA_PATH` は `docker-compose.yml` のボリューム置換に使われ、ホストのパスをコンテナ内の `/host_data` にマウントします。
-- `SATDL_BASE_PATH` を渡すと `run.py` の `BASE_PATH` を明示的に上書きできます（優先されます）。
-- これにより、出力はコンテナ経由でホストの `D:/sugimoto/Aso/Sentinel-2/...` に保存されます。
+この例では、コンテナ内の `/host_data/Aso/Sentinel-2` が、ホスト側の `D:/sugimoto/Aso/Sentinel-2` に対応します。
 
-永続的に `python3` を使う設定にしたい場合は、`docker-compose.yml` の `command` を `python3` に変更してください。
+### Docker のキャッシュ
 
-GPU が認識されているかは次で確認できます。
+初回実行時は、omnicloudmask や PyTorch 関連のモデル取得に時間がかかることがあります。このリポジトリでは Docker volume にキャッシュを保存します。
 
-```bash
-docker compose run --rm downloader python3 -c "import torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none'); print('arch_list', torch.cuda.get_arch_list() if torch.cuda.is_available() else [])"
-```
+- `satdl_model_cache`: Hugging Face や torch などのキャッシュ
+- `satdl_model_data`: omnicloudmask のローカルデータ
 
-補足（モデルダウンロード高速化）:
-
-- 初回実行時のみ、omnicloudmask のモデルを Hugging Face からダウンロードするため時間がかかります。
-- このリポジトリの docker-compose は次を named volume で永続化しています。
-  - /root/.cache （HF キャッシュなど）
-  - /root/.local/share （omnicloudmask の実モデル保存先）
-- そのため、2回目以降はモデル再ダウンロードを回避できます。
-- キャッシュを消して再取得したい場合は以下を実行します。
+キャッシュを消して再取得したい場合:
 
 ```bash
 docker volume rm satellite_image_downloader_satdl_model_cache
 docker volume rm satellite_image_downloader_satdl_model_data
 ```
 
-## パス可搬性（重要）
+### GPU の確認
 
-絶対パスはローカル実行ではそのまま利用できます。
-
-- ローカル実行（python run.py）: 絶対パス利用可
-- Docker 実行: コンテナから見えるパスのみ利用可
-
-本プロジェクトでは、固定ドライブ文字依存を避けるため、任意ホストパスをバインドできるようにしています。
-
-- ホスト側パス（設定可能）: ${SATDL_HOST_DATA_PATH}
-- コンテナ側パス: /host_data
-
-例（Windows PowerShell）:
+Docker 内で GPU が見えているか確認する例です。
 
 ```bash
-$env:SATDL_HOST_DATA_PATH = "D:/sat_data"
-docker compose run --rm downloader
+docker compose run --rm downloader python3 -c "import torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
 ```
 
-この場合、config/config.yaml ではコンテナ側パスで指定します。
+## Python から使う
 
-- geojson: /host_data/config/area.geojson
-- output: /host_data/output
-
-注意:
-
-- geojson の場所や output の保存先が作業ディレクトリ外にある場合は、
-  必ず config/config.yaml（または関数引数）でそのパスを明示指定してください。
-- 省略すると、既定の相対パス（./config/... や ./output）が使われるため、
-  意図しない場所を参照・出力してしまう可能性があります。
-- config/config.yaml を使う場合、相対パスは基本的にプロジェクトルート
-  （run.py があるディレクトリ）基準で解決されます。
-
-データをリポジトリ配下に置く運用なら、./config/area.geojson と ./output のような相対パスが最も簡単で可搬性が高いです。
-
-## Python API
-
-Python から直接呼び出すこともできます。
+`src.pipeline.satellite_image_downloader` を直接呼び出すこともできます。
 
 ```python
 from src.pipeline import satellite_image_downloader
@@ -272,70 +415,81 @@ satellite_image_downloader(
     sdate="20240101",
     edate="20240131",
     output_path="output",
+    config_path="config/config.yaml",
 )
 ```
 
-`sdate` と `edate` も配列で渡せます。以下は3回ループ実行されます。
+複数日をまとめて処理する例:
 
 ```python
 from src.pipeline import satellite_image_downloader
 
 satellite_image_downloader(
-  satellite_type=["sentinel2"],
-  geojson_path="config/area.geojson",
-  sdate=[20230306, 20230311, 20230410],
-  edate=[20230306, 20230311, 20230410],
-  output_path="output",
+    satellite_type=["sentinel2"],
+    geojson_path="config/area.geojson",
+    sdate=[20230306, 20230311, 20230410],
+    edate=[20230306, 20230311, 20230410],
+    output_path="output",
+    config_path="config/config.yaml",
 )
 ```
 
-## run.py を編集してループ実行する方法
+`config_path` を渡すと、`config/config.yaml` の詳細設定を読み込んだうえで、`satellite_type`、`geojson_path`、`sdate`、`edate`、`output_path` が上書きされます。
 
-ご認識の通り、for 文の中で satellite_image_downloader を呼べば、
-対象領域だけを変えて同じ条件で一括実行できます。
+## パス指定の注意
 
-実装の考え方:
+相対パスは、まずプロジェクトルート（`run.py` があるディレクトリ）を基準に解決されます。ファイルが存在しない場合は、設定ファイルがあるディレクトリも候補になります。
 
-1. run.py で satellite_image_downloader を import する
-2. 領域ごとの geojson パスや出力先を配列で定義する
-3. for 文で順番に呼び出す
-
-run.py の最小例:
-
-```python
-from src.pipeline import satellite_image_downloader
-
-targets = [
-  {
-    "name": "region01",
-    "geojson": "config/region01.geojson",
-    "output": "output/region01",
-  },
-  {
-    "name": "region02",
-    "geojson": "config/region02.geojson",
-    "output": "output/region02",
-  },
-]
-
-for t in targets:
-  print(f"start: {t['name']}")
-  satellite_image_downloader(
-    satellite_type=["sentinel2", "landsat89"],
-    geojson_path=t["geojson"],
-    sdate="20240101",
-    edate="20240131",
-    output_path=t["output"],
-  )
-  print(f"done: {t['name']}")
+```yaml
+geojson: ./config/no5.geojson
+output: ./output
 ```
 
-補足:
+Docker 実行では、コンテナから見えるパスを指定してください。ホスト側の任意フォルダを使いたい場合は、`SATDL_HOST_DATA_PATH` で `/host_data` にマウントしてから、設定ファイルでは `/host_data/...` のように指定します。
 
-- Docker 実行時に作業ディレクトリ外のデータを使う場合は、
-  geojson_path と output_path を /host_data/... のような
-  コンテナ側パスで指定してください。
-- ローカル実行時に作業ディレクトリ外を使う場合は、
-  geojson_path と output_path に絶対パスを指定してください。
-- run.py をシンプルに保ちたい場合は、同じ内容を別ファイル
-  （例: scripts/batch_run.py）として作る運用でも問題ありません。
+例:
+
+```yaml
+geojson: /host_data/config/no5.geojson
+output: /host_data/output
+```
+
+## よくあるトラブル
+
+### active fire が出力されない
+
+- `key.env` に `FIRMS_API_KEY=...` が書かれているか確認してください。
+- `firms.key_env_path` が正しいか確認してください。
+- `firms.activefire_satellite` と `firms.product_map` の両方が設定されているか確認してください。
+- API キーがない場合、active fire はスキップされます。
+
+### 出力が見つからない
+
+- `config/config.yaml` の `output` を確認してください。
+- Docker 実行時は、ホスト側パスではなくコンテナ側パスで出力している可能性があります。
+- バッチ実行時は `SATDL_BASE_PATH` または `SATDL_HOST_DATA_PATH` の設定を確認してください。
+
+### 既存ファイルがあるのに再処理される、または処理されない
+
+`file_exists` を確認してください。
+
+```yaml
+file_exists: skip       # 既存の img があればスキップ
+file_exists: overwrite  # 再作成
+```
+
+### CUDA エラーが出る
+
+`omnicloudmask.device` を `cpu` に変更すると、GPU なしでも実行できます。ただし処理は遅くなります。
+
+```yaml
+omnicloudmask:
+  device: cpu
+```
+
+## 実装上の補足
+
+- Sentinel-2 は `s2:processing_baseline >= 4.0` のシーンで DN offset を考慮します。
+- Sentinel-2 の標準解像度は 10 m、Landsat 8/9 は 30 m として処理します。
+- 同じ日に複数シーンがある場合、雲マスク後の画像は日別にコンポジットされます。
+- active fire の CRS は、可能な場合 Sentinel-2 出力 CRS に合わせます。推定できない場合は `EPSG:4326` を使います。
