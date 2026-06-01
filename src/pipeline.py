@@ -687,7 +687,12 @@ def _extract_solar_angles(item: Item) -> Tuple[Optional[float], Optional[float]]
     return solar_azimuth, solar_zenith
 
 
-def _build_metadata_feature(item: Item) -> Optional[Dict[str, Any]]:
+def _build_metadata_feature(
+    item: Item,
+    *,
+    satellite_key: Optional[str] = None,
+    dn_add_offset: float = 0.0,
+) -> Optional[Dict[str, Any]]:
     if item.geometry is None:
         return None
 
@@ -700,6 +705,18 @@ def _build_metadata_feature(item: Item) -> Optional[Dict[str, Any]]:
         "Solar_Azimuth_Angle": solar_azimuth,
         "Solar_Zenith_Angle": solar_zenith,
     }
+
+    if satellite_key == "sentinel2":
+        baseline_val = _parse_processing_baseline(item.properties.get("s2:processing_baseline"))
+        if baseline_val is None:
+            baseline_val = _parse_processing_baseline(item.properties.get("processing_baseline"))
+
+        props.update({
+            "s2_processing_baseline": baseline_val,
+            "dn_offset": float(dn_add_offset),
+            "dn_offset_applied": bool(dn_add_offset),
+            "dn_offset_reason": "processing_baseline>=4.0" if dn_add_offset else "none",
+        })
 
     return {
         "type": "Feature",
@@ -875,45 +892,10 @@ def _download_item_stack(
         except Exception:
             LOGGER.debug("Failed to write DN offset tags for %s", output_stack_path)
 
-    # Also write a sidecar JSON with metadata for programmatic 判定
-    try:
-        # Include processing baseline and reason to allow consumers to decide
-        baseline_val = None
-        try:
-            baseline_val = _parse_processing_baseline(item.properties.get("s2:processing_baseline"))
-            if baseline_val is None:
-                baseline_val = _parse_processing_baseline(item.properties.get("processing_baseline"))
-        except Exception:
-            baseline_val = None
-
-        if baseline_val is not None and float(baseline_val) >= 4.0:
-            dn_reason = "processing_baseline>=4.0"
-        else:
-            dn_reason = "none"
-
-        meta = {
-            "item_id": str(item.id),
-            "dn_offset": float(dn_add_offset),
-            "dn_offset_applied": bool(dn_add_offset),
-            "dn_offset_reason": dn_reason,
-            "s2_processing_baseline": baseline_val,
-            "band_numbers": list(download_band_numbers),
-            "band_labels": list(band_labels),
-            "profile": {
-                "count": int(profile.get("count", 0)),
-                "crs": _crs_to_string(profile.get("crs")),
-                "transform": str(profile.get("transform")),
-                "width": int(profile.get("width", 0)),
-                "height": int(profile.get("height", 0)),
-            },
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        json_path = output_stack_path.with_suffix(".json")
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        with json_path.open("w", encoding="utf-8") as jf:
-            json.dump(meta, jf, ensure_ascii=False, separators=(",", ":"))
-    except Exception:
-        LOGGER.warning("Failed to write sidecar metadata for %s", output_stack_path)
+    baseline_val = _parse_processing_baseline(item.properties.get("s2:processing_baseline"))
+    if baseline_val is None:
+        baseline_val = _parse_processing_baseline(item.properties.get("processing_baseline"))
+    dn_reason = "processing_baseline>=4.0" if baseline_val is not None and float(baseline_val) >= 4.0 else "none"
     try:
         # Also add DN offset reason as a GeoTIFF tag
         with rasterio.open(output_stack_path, "r+") as dst:
@@ -1408,7 +1390,11 @@ def _process_satellite_imagery(
                         output_crs = _infer_item_output_crs(item)
 
                 if metadata_enabled:
-                    feature = _build_metadata_feature(item)
+                    feature = _build_metadata_feature(
+                        item,
+                        satellite_key=satellite_key,
+                        dn_add_offset=dn_add_offset,
+                    )
                     if feature is not None:
                         metadata_features.append(feature)
 
