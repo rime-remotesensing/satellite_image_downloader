@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -96,6 +97,14 @@ WGS84 = (
 from omnicloudmask import predict_from_array  # noqa: E402
 
 
+GDAL_HTTP_OPTIONS = {
+    "GDAL_HTTP_CONNECTTIMEOUT": "30",
+    "GDAL_HTTP_TIMEOUT": "120",
+    "GDAL_HTTP_MAX_RETRY": "3",
+    "GDAL_HTTP_RETRY_DELAY": "5",
+}
+
+
 DN_CONVERSION_PRESETS: Dict[str, Dict[str, float]] = {
     "sentinel2": {"scale": 1 / 10000, "offset": 0.0},
     "landsat8": {"scale": 0.0000275, "offset": -0.2},
@@ -131,25 +140,18 @@ def _prepare_for_cloudmask(
     satellite_key: str = "sentinel2",
     dn_add_offset: float = 0.0,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Read the three bands for cloudmask and convert to reflectance (0..1).
+    """Read the three cloudmask bands and convert corrected DN to reflectance.
 
-    This ensures the cloudmask model receives reflectance-scaled inputs
-    (important because some models expect 0..1 reflectance rather than raw DN).
+    Sentinel-2 RADIO_ADD_OFFSET is already removed in img/ when applicable.
     """
     with rasterio.open(image_path) as src:
         data = src.read(list(custom_band_indices)).astype(np.float32)
         meta = src.meta.copy()
 
-    # Apply DN->reflectance conversion per satellite preset
     preset = DN_CONVERSION_PRESETS.get(satellite_key)
     if preset is None:
         raise ValueError(f"Unsupported satellite for DN conversion: {satellite_key}")
-
-    if satellite_key == "sentinel2":
-        data = (data - dn_add_offset) * preset["scale"] + preset["offset"]
-    else:
-        data = data * preset["scale"] + preset["offset"]
-
+    data = data * preset["scale"] + preset["offset"]
     data = np.clip(data, 0.0, 1.0)
 
     return data, meta
@@ -164,37 +166,34 @@ def _apply_cloud_mask_local(
     snow_mask_path: Optional[Path] = None,
     dn_add_offset: float = 0.0,
 ) -> Path:
-    if satellite_type not in DN_CONVERSION_PRESETS:
-        raise ValueError(f"Unsupported satellite type for reflectance conversion: {satellite_type}")
-
-    preset = DN_CONVERSION_PRESETS[satellite_type]
-
     with rasterio.open(image_path) as src:
-        raw_data = src.read().astype(np.float32)
+        data = src.read().astype(np.float32)
         meta = src.meta.copy()
         src_nodata = src.nodata
+    nodata_mask = data[0] == src_nodata if src_nodata is not None else None
+    all_zero_mask = np.all(data == 0, axis=0)
 
     with rasterio.open(mask_path) as msrc:
         cloud_mask = msrc.read(1)
 
-    if cloud_mask.shape != raw_data.shape[1:]:
+    if cloud_mask.shape != data.shape[1:]:
         raise ValueError(
-            f"Mask shape mismatch. image={raw_data.shape[1:]}, mask={cloud_mask.shape}"
+            f"Mask shape mismatch. image={data.shape[1:]}, mask={cloud_mask.shape}"
         )
 
     snow_mask = None
     if snow_mask_path is not None:
         with rasterio.open(snow_mask_path) as ssrc:
             snow_mask = ssrc.read(1)
-        if snow_mask.shape != raw_data.shape[1:]:
+        if snow_mask.shape != data.shape[1:]:
             raise ValueError(
-                f"Snow mask shape mismatch. image={raw_data.shape[1:]}, snow={snow_mask.shape}"
+                f"Snow mask shape mismatch. image={data.shape[1:]}, snow={snow_mask.shape}"
             )
 
-    if satellite_type == "sentinel2":
-        data = (raw_data - dn_add_offset) * preset["scale"] + preset["offset"]
-    else:
-        data = raw_data * preset["scale"] + preset["offset"]
+    if satellite_type not in DN_CONVERSION_PRESETS:
+        raise ValueError(f"Unsupported satellite type for reflectance conversion: {satellite_type}")
+    preset = DN_CONVERSION_PRESETS[satellite_type]
+    data = data * preset["scale"] + preset["offset"]
     data = np.clip(data, 0.0, 1.0)
 
     mask_target = np.isin(cloud_mask, mask_classes)
@@ -203,13 +202,11 @@ def _apply_cloud_mask_local(
     for band_idx in range(data.shape[0]):
         data[band_idx][mask_target] = np.nan
 
-    if src_nodata is not None:
-        nodata_mask = raw_data[0] == src_nodata
+    if nodata_mask is not None:
         for band_idx in range(data.shape[0]):
             data[band_idx][nodata_mask] = np.nan
 
-    # Swath外などの全バンド0画素は観測外とみなして除外
-    all_zero_mask = np.all(raw_data == 0, axis=0)
+    # Swath外などの全バンチE画素は観測外とみなして除夁E
     if all_zero_mask.any():
         for band_idx in range(data.shape[0]):
             data[band_idx][all_zero_mask] = np.nan
@@ -253,9 +250,9 @@ def _create_ndsi_snow_mask_local(
         meta = src.meta.copy()
 
     if satellite_key == "sentinel2":
-        green_ref = np.clip((green - dn_add_offset) / 10000.0, 0.0, 1.0)
-        red_ref = np.clip((red - dn_add_offset) / 10000.0, 0.0, 1.0)
-        swir_ref = np.clip((swir - dn_add_offset) / 10000.0, 0.0, 1.0)
+        green_ref = np.clip(green / 10000.0, 0.0, 1.0)
+        red_ref = np.clip(red / 10000.0, 0.0, 1.0)
+        swir_ref = np.clip(swir / 10000.0, 0.0, 1.0)
     else:
         green_ref = np.clip(green * 0.0000275 - 0.2, 0.0, 1.0)
         red_ref = np.clip(red * 0.0000275 - 0.2, 0.0, 1.0)
@@ -564,6 +561,7 @@ def _resolve_band_request(
     config: Dict[str, Any],
     satellite_key: str,
     *,
+    cloudmask_enabled: bool = True,
     snowmask_enabled: bool = False,
 ) -> Tuple[List[int], List[int]]:
     if satellite_key == "sentinel2":
@@ -592,9 +590,10 @@ def _resolve_band_request(
     if invalid:
         raise ValueError(f"Invalid band numbers for {satellite_key}: {invalid}")
 
-    required = CLOUDMASK_REQUIRED_BANDS[satellite_key]
-    downloaded_set = set(requested + required)
-    if snowmask_enabled:
+    downloaded_set = set(requested)
+    if cloudmask_enabled:
+        downloaded_set.update(CLOUDMASK_REQUIRED_BANDS[satellite_key])
+    if cloudmask_enabled and snowmask_enabled:
         downloaded_set.update(SNOWMASK_REQUIRED_BANDS[satellite_key])
     downloaded = sorted(downloaded_set)
     return downloaded, requested
@@ -652,7 +651,7 @@ def _infer_item_output_crs(item: Item) -> Optional[str]:
         if asset.media_type and "image" not in asset.media_type:
             continue
         href = planetary_computer.sign(asset.href)
-        with rasterio.open(href) as src:
+        with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
             return _crs_to_string(src.crs)
 
     return None
@@ -708,7 +707,11 @@ def _extract_solar_angles(item: Item) -> Tuple[Optional[float], Optional[float]]
     return solar_azimuth, solar_zenith
 
 
-def _build_metadata_feature(item: Item) -> Optional[Dict[str, Any]]:
+def _build_metadata_feature(
+    item: Item,
+    *,
+    dn_add_offset: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
     if item.geometry is None:
         return None
 
@@ -721,6 +724,13 @@ def _build_metadata_feature(item: Item) -> Optional[Dict[str, Any]]:
         "Solar_Azimuth_Angle": solar_azimuth,
         "Solar_Zenith_Angle": solar_zenith,
     }
+    processing_baseline = item.properties.get("s2:processing_baseline")
+    if processing_baseline is None:
+        processing_baseline = item.properties.get("processing_baseline")
+    if processing_baseline is not None:
+        props["Processing_Baseline"] = processing_baseline
+    if dn_add_offset is not None:
+        props["DN_Add_Offset"] = dn_add_offset
 
     return {
         "type": "Feature",
@@ -762,9 +772,10 @@ def _build_grid_for_item(
     if first_asset is None:
         raise ValueError(f"No raster assets found in item: {item.id}")
 
+    LOGGER.info("Preparing grid for item %s", item.id)
     href = planetary_computer.sign(first_asset.href)
     LOGGER.debug("Opening asset href=%s for item=%s", href, getattr(item, "id", None))
-    with rasterio.open(href) as src:
+    with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
         if src.crs is None:
             raise ValueError(f"Asset has no CRS: {first_asset.href}")
 
@@ -820,6 +831,7 @@ def _build_grid_for_item(
             "nodata": 0.0,
         }
 
+    LOGGER.info("Prepared grid for item %s", item.id)
     return geom_in_item_crs, transform, width, height, profile_template
 
 
@@ -831,6 +843,8 @@ def _download_item_stack(
     download_band_numbers: List[int],
     output_stack_path: Path,
     *,
+    conversion_satellite_type: str,
+    dn_add_offset: float = 0.0,
     output_crs_override: Optional[str] = None,
     use_bbox_extent: bool = False,
     snap_to_resolution_grid: bool = False,
@@ -847,16 +861,17 @@ def _download_item_stack(
     arrays: List[np.ndarray] = []
     band_labels: List[str] = []
 
-    for band_number in download_band_numbers:
+    def _read_band(band_number: int) -> Tuple[np.ndarray, str]:
         asset_key, label = band_map[band_number]
         asset = item.assets.get(asset_key)
         if asset is None:
             raise ValueError(f"Missing asset '{asset_key}' for item {item.id}")
 
+        LOGGER.info("Reading band %s (%s) for item %s", band_number, label, item.id)
         href = planetary_computer.sign(asset.href)
         resampling = Resampling.nearest  # Match GEE default (nearest neighbor)
 
-        with rasterio.open(href) as src:
+        with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
             with WarpedVRT(
                 src,
                 crs=profile_template["crs"],
@@ -869,18 +884,44 @@ def _download_item_stack(
                 arr = vrt.read(1).astype(np.float32)
                 valid_mask = vrt.read_masks(1) > 0
                 arr[~valid_mask] = 0.0
+        LOGGER.info("Finished band %s (%s) for item %s", band_number, label, item.id)
 
-        arrays.append(arr)
-        band_labels.append(label)
+        return arr, label
 
-    stack = np.stack(arrays, axis=0)
+    max_workers = 1
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for arr, label in executor.map(_read_band, download_band_numbers):
+                arrays.append(arr)
+                band_labels.append(label)
+    else:
+        for band_number in download_band_numbers:
+            arr, label = _read_band(band_number)
+            arrays.append(arr)
+            band_labels.append(label)
+
+    stack = np.stack(arrays, axis=0).astype(np.float32)
+    valid_stack_mask = stack != 0
+    if conversion_satellite_type == "sentinel2":
+        stack = stack - dn_add_offset
+        stack = np.maximum(stack, 0.0)
+    stack[~valid_stack_mask] = 0.0
     output_stack_path.parent.mkdir(parents=True, exist_ok=True)
 
     profile = profile_template.copy()
     profile.update({"count": stack.shape[0]})
+    processing_baseline = item.properties.get("s2:processing_baseline")
+    if processing_baseline is None:
+        processing_baseline = item.properties.get("processing_baseline")
 
     with rasterio.open(output_stack_path, "w", **profile) as dst:
         dst.write(stack)
+        dst.update_tags(
+            data_units="corrected_dn",
+            dn_add_offset=dn_add_offset,
+            conversion_satellite_type=conversion_satellite_type,
+            processing_baseline="" if processing_baseline is None else str(processing_baseline),
+        )
 
     return {
         "stack_path": output_stack_path,
@@ -958,6 +999,7 @@ def _run_cloudmask_and_mask(
     conversion_satellite_type: str,
     conversion_dn_add_offset: float = 0.0,
 ) -> Path:
+    LOGGER.info("_run_cloudmask_and_mask start: stack=%s", getattr(stack_path, 'name', str(stack_path)))
     custom_band_indices = _custom_band_indices_for_cloudmask(download_band_numbers, satellite_key)
     prep_data, prep_meta = _prepare_for_cloudmask(
         image_path=stack_path,
@@ -1011,6 +1053,8 @@ def _run_cloudmask_and_mask(
     with rasterio.open(cloudmask_path, "w", **mask_profile) as dst:
         dst.write(cloudmask)
 
+    LOGGER.info("Wrote cloudmask to %s", cloudmask_path)
+
     masked_stack_path.parent.mkdir(parents=True, exist_ok=True)
     result_path = _apply_cloud_mask_local(
         image_path=stack_path,
@@ -1021,6 +1065,7 @@ def _run_cloudmask_and_mask(
         dn_add_offset=conversion_dn_add_offset,
     )
 
+    LOGGER.info("_run_cloudmask_and_mask finished: result=%s", result_path)
     return result_path
 
 
@@ -1207,6 +1252,9 @@ def _process_satellite_imagery(
     red_threshold = float(snowmask_cfg.get("red_threshold", 0.2))
     metadata_cfg = config.get("metadata", {})
     metadata_enabled = bool(metadata_cfg.get("enabled", True))
+    img_only = _as_bool(config.get("img_only"), default=False)
+    if img_only:
+        file_exists_mode = "overwrite"
 
     gee_cfg = config.get("gee_compatible", {})
     gee_enabled = _as_bool(gee_cfg.get("enabled"), default=False)
@@ -1223,6 +1271,7 @@ def _process_satellite_imagery(
     download_band_numbers, _ = _resolve_band_request(
         config,
         satellite_key,
+        cloudmask_enabled=not img_only,
         snowmask_enabled=snowmask_enabled,
     )
     target_resolution = TARGET_RESOLUTION[satellite_key]
@@ -1251,12 +1300,13 @@ def _process_satellite_imagery(
     metadata_output_path = img_dir / metadata_filename
 
     img_dir.mkdir(parents=True, exist_ok=True)
-    masked_dir.mkdir(parents=True, exist_ok=True)
-    snowmasked_dir.mkdir(parents=True, exist_ok=True)
-    cloudmask_dir.mkdir(parents=True, exist_ok=True)
-    masked_tmp_dir.mkdir(parents=True, exist_ok=True)
-    cloudmask_tmp_dir.mkdir(parents=True, exist_ok=True)
-    if snowmask_enabled:
+    if not img_only:
+        masked_dir.mkdir(parents=True, exist_ok=True)
+        snowmasked_dir.mkdir(parents=True, exist_ok=True)
+        cloudmask_dir.mkdir(parents=True, exist_ok=True)
+        masked_tmp_dir.mkdir(parents=True, exist_ok=True)
+        cloudmask_tmp_dir.mkdir(parents=True, exist_ok=True)
+    if not img_only and snowmask_enabled:
         snowmasked_tmp_dir.mkdir(parents=True, exist_ok=True)
         snowmask_tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1326,7 +1376,24 @@ def _process_satellite_imagery(
                     img_stack_path,
                 )
                 continue
+            # group key for grouping outputs by prefix/date
+            group_key = (prefix, date_token)
 
+            # If a per-scene masked output already exists, skip re-processing this scene.
+            # Prefer masked temporary output, then final masked output.
+            cloudmask_path = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
+            masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
+            final_masked_path = masked_dir / f"{scene_stem}_masked.tif"
+            if not img_only and (masked_stack_path.exists() or final_masked_path.exists()):
+                LOGGER.info("Skipping scene %s: masked output already exists", scene_stem)
+                # Add existing paths to grouped lists so later compositing can use them
+                grouped_masked[group_key].append(masked_stack_path if masked_stack_path.exists() else final_masked_path)
+                if cloudmask_path.exists():
+                    grouped_cloudmask[group_key].append(cloudmask_path)
+                processed_items += 1
+                continue
+
+            LOGGER.info("Starting download for scene %s", scene_stem)
             download_info = _download_item_stack(
                 item=item,
                 geometry_wgs84=geometry_wgs84,
@@ -1334,10 +1401,13 @@ def _process_satellite_imagery(
                 band_map=band_map,
                 download_band_numbers=download_band_numbers,
                 output_stack_path=img_stack_path,
+                conversion_satellite_type=conversion_sat_type,
+                dn_add_offset=dn_add_offset,
                 output_crs_override=output_crs_override,
                 use_bbox_extent=use_bbox_extent,
                 snap_to_resolution_grid=snap_to_resolution_grid,
             )
+            LOGGER.info("Finished download for scene %s", scene_stem)
 
             if reference_raster_path is None:
                 reference_raster_path = str(img_stack_path)
@@ -1348,12 +1418,17 @@ def _process_satellite_imagery(
                     output_crs = _infer_item_output_crs(item)
 
             if metadata_enabled:
-                feature = _build_metadata_feature(item)
+                feature = _build_metadata_feature(item, dn_add_offset=dn_add_offset)
                 if feature is not None:
                     metadata_features.append(feature)
 
             group_key = (prefix, date_token)
+            processed_items += 1
 
+            if img_only:
+                continue
+
+            LOGGER.info("Starting cloudmask for scene %s", scene_stem)
             cloudmask_path = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
             masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
 
@@ -1369,10 +1444,12 @@ def _process_satellite_imagery(
                 conversion_satellite_type=conversion_sat_type,
                 conversion_dn_add_offset=dn_add_offset,
             )
+            LOGGER.info("Finished cloudmask for scene %s", scene_stem)
             grouped_masked[group_key].append(masked_stack_path)
             grouped_cloudmask[group_key].append(cloudmask_path)
 
             if snowmask_enabled:
+                LOGGER.info("Starting snowmask for scene %s", scene_stem)
                 snowmask_path = snowmask_tmp_dir / f"{scene_stem}_snowmask.tif"
                 _create_ndsi_snow_mask_local(
                     image_path=img_stack_path,
@@ -1394,12 +1471,29 @@ def _process_satellite_imagery(
                     snow_mask_path=snowmask_path,
                     dn_add_offset=dn_add_offset,
                 )
+                LOGGER.info("Finished snowmask for scene %s", scene_stem)
                 grouped_snowmasked[group_key].append(snowmasked_stack_path)
                 grouped_snowmask[group_key].append(snowmask_path)
 
-            processed_items += 1
-
         masked_items = 0
+        if img_only:
+            if metadata_enabled and metadata_features:
+                _save_metadata_geojson(metadata_features, metadata_output_path)
+            return {
+                "searched_items": len(items),
+                "processed_items": processed_items,
+                "masked_items": 0,
+                "snowmasked_items": 0,
+                "cloudmask_items": 0,
+                "snowmask_enabled": snowmask_enabled,
+                "img_only": img_only,
+                "output_crs": output_crs,
+                "reference_raster": reference_raster_path,
+                "metadata_enabled": metadata_enabled,
+                "metadata_file": str(metadata_output_path) if metadata_enabled and metadata_features else None,
+            }
+
+        LOGGER.info("Starting masked composite for window %s-%s", start_date, end_date)
         for (prefix, date_token), paths in sorted(grouped_masked.items()):
             composite, profile = _composite_stacks(
                 paths,
@@ -1417,6 +1511,7 @@ def _process_satellite_imagery(
             masked_items += 1
 
         cloudmask_items = 0
+        LOGGER.info("Starting cloudmask composite for window %s-%s", start_date, end_date)
         for (prefix, date_token), paths in sorted(grouped_cloudmask.items()):
             composite, profile = _composite_stacks(
                 paths,
@@ -1437,6 +1532,7 @@ def _process_satellite_imagery(
 
         snowmasked_items = 0
         if snowmask_enabled:
+            LOGGER.info("Starting snowmasked composite for window %s-%s", start_date, end_date)
             for (prefix, date_token), paths in sorted(grouped_snowmasked.items()):
                 composite, profile = _composite_stacks(
                     paths,
@@ -1480,6 +1576,7 @@ def _process_satellite_imagery(
             "snowmasked_items": snowmasked_items,
             "cloudmask_items": cloudmask_items,
             "snowmask_enabled": snowmask_enabled,
+            "img_only": img_only,
             "output_crs": output_crs,
             "reference_raster": reference_raster_path,
             "metadata_enabled": metadata_enabled,
@@ -2081,6 +2178,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path, skip_satellite_subdir
 
     satellites = _normalize_satellites(config["satellite"])
     firms_cfg = config.get("firms", {})
+    img_only = _as_bool(config.get("img_only"), default=False)
 
     activefire_targets: List[str]
     if "activefire_satellite" in firms_cfg:
@@ -2112,6 +2210,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path, skip_satellite_subdir
                 "satellite": satellites,
                 "activefire_satellite": activefire_targets,
                 "output": str(output_root),
+                "img_only": img_only,
             }
         }
 
@@ -2141,7 +2240,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path, skip_satellite_subdir
                 skip_satellite_subdir=skip_satellite_subdir,
             )
 
-        if include_activefire and activefire_targets:
+        if not img_only and include_activefire and activefire_targets:
             activefire_crs_ref = None
             activefire_reference_raster = None
             if "sentinel2" in summary and isinstance(summary["sentinel2"], dict):
@@ -2205,7 +2304,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path, skip_satellite_subdir
     combined_end = max(end_dates)
     activefire_summary: Optional[Dict[str, Any]] = None
 
-    if activefire_targets:
+    if not img_only and activefire_targets:
         if not activefire_crs_ref:
             try:
                 s2_items = _search_stac_items(
@@ -2244,6 +2343,7 @@ def run_pipeline(config: Dict[str, Any], config_dir: Path, skip_satellite_subdir
             "satellite": satellites,
             "activefire_satellite": activefire_targets,
             "output": str(output_root),
+            "img_only": img_only,
         },
         "total_runs": len(runs),
         "activefire_range": {
@@ -2278,6 +2378,7 @@ def satellite_image_downloader(
     skip_satellite_subdir: bool = False,
     *,
     batch_mode: bool = False,
+    img_only: bool = False,
 ) -> Dict[str, Any]:
     runtime_config: Dict[str, Any] = {
         "satellite": list(satellite_type) if not isinstance(satellite_type, str) else satellite_type,
@@ -2299,5 +2400,8 @@ def satellite_image_downloader(
     # hardcoded required dates are processed even if eo:cloud_cover is high.
     if batch_mode:
         runtime_config["max_cloud_cover"] = None
+    if img_only:
+        runtime_config["img_only"] = True
+        runtime_config["file_exists"] = "overwrite"
 
     return run_pipeline(config=runtime_config, config_dir=config_dir, skip_satellite_subdir=skip_satellite_subdir)

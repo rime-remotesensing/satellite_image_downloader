@@ -7,7 +7,7 @@ import sys
 import os
 from pathlib import Path
 
-from src.pipeline import run_pipeline_from_config, satellite_image_downloader
+from src.pipeline import _load_config, run_pipeline, run_pipeline_from_config, satellite_image_downloader
 
 # Region to config file mapping with hardcoded dates
 BATCH_MODE_REGIONS = [
@@ -117,6 +117,11 @@ def main() -> int:
         action="store_true",
         help="Force batch mode (download dates for all regions to their respective directories).",
     )
+    parser.add_argument(
+        "--img-only",
+        action="store_true",
+        help="Regenerate only img/ scene stacks and metadata; skip cloudmask/masked/snowmasked outputs.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -167,6 +172,7 @@ def main() -> int:
                         output_path=region_output_path,
                         config_path="config/config.yaml",
                         batch_mode=True,
+                        img_only=args.img_only,
                         skip_satellite_subdir=True,
                     )
                     
@@ -205,7 +211,14 @@ def main() -> int:
         return 1
 
     try:
-        summary = run_pipeline_from_config(args.config)
+        if args.img_only:
+            config_path = args.config.resolve()
+            config = _load_config(config_path)
+            config["img_only"] = True
+            config["file_exists"] = "overwrite"
+            summary = run_pipeline(config=config, config_dir=config_path.parent)
+        else:
+            summary = run_pipeline_from_config(args.config)
     except Exception as exc:
         logger.error("Pipeline failed: %s", exc, exc_info=True)
         return 1

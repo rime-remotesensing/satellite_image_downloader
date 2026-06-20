@@ -2,14 +2,15 @@
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
 geojson: ./config/no5.geojson
-startday: [20260425]
-endday:   [20260425]
+startday: [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426, 20210506]
+endday:   [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426, 20210506]
 # 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
 # FIRMS active fire targets are recommended to be set in firms.activefire_satellite
 satellite:
-  - sentinel2
+  - modis
+  - viirs
 
 # Output root directory
 # 出力は各衛星ごとに以下を作成:
@@ -32,6 +33,7 @@ cloudmask: [1, 3]
 # Optional STAC filter
 max_cloud_cover: 80
 file_exists: skip # overwrite or skip
+img_only: false # true: regenerate only img/ and metadata, skip cloudmask/masked/snowmasked
 
 # GEE compatibility options (Sentinel-2)
 # - output_crs: Match Get_Sentinel2.py export CRS
@@ -90,10 +92,10 @@ firms:
   product_map:
     # MODIS_SP は Terra/Aqua を含む標準処理データ
     modis:
-      - MODIS_NRT
+      - MODIS_SP
     # VIIRS はセンサ別。SNPP + NOAA-20 を両方取得
     # NOAA-21 は現状 NRT 系のみ（必要なら VIIRS_NOAA21_NRT を追加）
     viirs:
-      - VIIRS_SNPP_NRT
-      - VIIRS_NOAA20_NRT
-      - VIIRS_NOAA21_NRT
+      - VIIRS_SNPP_SP
+      - VIIRS_NOAA20_SP
+      - VIIRS_NOAA21_SP
