@@ -7,7 +7,8 @@ import sys
 import os
 from pathlib import Path
 
-from src.pipeline import _load_config, run_pipeline, run_pipeline_from_config, satellite_image_downloader
+from src.config import _load_config
+from src.pipeline import run_pipeline, run_pipeline_from_config, satellite_image_downloader
 
 # Region to config file mapping with hardcoded dates
 BATCH_MODE_REGIONS = [
@@ -93,7 +94,6 @@ REGION_DOWNLOAD_DATES = {
     },
 }
 
-BASE_PATH = Path(os.environ.get("SATDL_HOST_DATA_PATH", "D:/sugimoto/Aso/Sentinel-2"))
 BASE_PATH = Path(
     os.environ.get(
         "SATDL_BASE_PATH",
