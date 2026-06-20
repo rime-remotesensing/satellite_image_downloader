@@ -1058,24 +1058,80 @@ def _process_satellite_imagery(
             scene_stem = f"{prefix}_{date_token}_{scene_tag}"
             img_stack_path = img_dir / f"{scene_stem}.tif"
 
-            if file_exists_mode == "skip" and img_stack_path.exists():
-                LOGGER.info(
-                    "Skipping existing scene %s for date %s (img exists: %s)",
-                    item.id,
-                    date_token,
-                    img_stack_path,
-                )
-                continue
-            group_key = (prefix, date_token)
+            group_key                = (prefix, date_token)
+            cloudmask_path           = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
+            masked_stack_path        = masked_tmp_dir    / f"{scene_stem}_masked.tif"
+            # composite paths: the actual date-level output files written after the scene loop
+            composite_masked_path    = masked_dir        / f"{prefix}_{date_token}_masked.tif"
+            composite_cloudmask_path = cloudmask_dir     / f"{prefix}_{date_token}_cloudmask.tif"
+            composite_snowmasked_path = snowmasked_dir   / f"{prefix}_{date_token}_snowmasked.tif"
 
-            cloudmask_path = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
-            masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
-            final_masked_path = masked_dir / f"{scene_stem}_masked.tif"
-            if not img_only and (masked_stack_path.exists() or final_masked_path.exists()):
-                LOGGER.info("Skipping scene %s: masked output already exists", scene_stem)
-                grouped_masked[group_key].append(masked_stack_path if masked_stack_path.exists() else final_masked_path)
-                if cloudmask_path.exists():
-                    grouped_cloudmask[group_key].append(cloudmask_path)
+            if file_exists_mode == "skip" and img_stack_path.exists():
+                if img_only:
+                    processed_items += 1
+                    continue
+                # The per-scene tmp files (_masked_tmp/) are deleted by the finally block on
+                # every run, so checking masked_stack_path is always False on a second run.
+                # We must check the date-level composite instead.
+                if composite_masked_path.exists():
+                    LOGGER.info(
+                        "Skipping scene %s: img and masked composite already exist on disk",
+                        scene_stem,
+                    )
+                    processed_items += 1
+                    continue
+                # img exists but masked is missing (e.g. previous run used img_only=true)
+                # skip re-download and run cloud masking only on the existing img
+                LOGGER.info(
+                    "img exists for %s but masked output is missing; running cloud masking only",
+                    scene_stem,
+                )
+                if reference_raster_path is None:
+                    reference_raster_path = str(img_stack_path)
+                if output_crs is None:
+                    output_crs = _infer_item_output_crs(item)
+                processed_items += 1
+                _run_cloudmask_and_mask(
+                    stack_path=img_stack_path,
+                    cloudmask_path=cloudmask_path,
+                    masked_stack_path=masked_stack_path,
+                    satellite_key=satellite_key,
+                    target_resolution=target_resolution,
+                    download_band_numbers=download_band_numbers,
+                    cloudmask_classes=cloudmask_classes,
+                    omnicloudmask_cfg=omnicloudmask_cfg,
+                    conversion_satellite_type=conversion_sat_type,
+                    conversion_dn_add_offset=dn_add_offset,
+                )
+                grouped_masked[group_key].append(masked_stack_path)
+                grouped_cloudmask[group_key].append(cloudmask_path)
+                if snowmask_enabled:
+                    _sm_path  = snowmask_tmp_dir   / f"{scene_stem}_snowmask.tif"
+                    _sms_path = snowmasked_tmp_dir / f"{scene_stem}_snowmasked.tif"
+                    _create_ndsi_snow_mask_local(
+                        image_path=img_stack_path,
+                        output_path=_sm_path,
+                        satellite_key=satellite_key,
+                        download_band_numbers=download_band_numbers,
+                        ndsi_threshold=ndsi_threshold,
+                        red_threshold=red_threshold,
+                        dn_add_offset=dn_add_offset,
+                    )
+                    _apply_cloud_mask_local(
+                        image_path=img_stack_path,
+                        mask_path=cloudmask_path,
+                        output_path=_sms_path,
+                        mask_classes=cloudmask_classes,
+                        satellite_type=conversion_sat_type,
+                        snow_mask_path=_sm_path,
+                        dn_add_offset=dn_add_offset,
+                    )
+                    grouped_snowmasked[group_key].append(_sms_path)
+                    grouped_snowmask[group_key].append(_sm_path)
+                continue
+
+            if file_exists_mode == "skip" and not img_only and composite_masked_path.exists():
+                LOGGER.info("Skipping scene %s: masked composite already exists on disk", scene_stem)
                 processed_items += 1
                 continue
 
@@ -1108,15 +1164,12 @@ def _process_satellite_imagery(
                 if feature is not None:
                     metadata_features.append(feature)
 
-            group_key = (prefix, date_token)
             processed_items += 1
 
             if img_only:
                 continue
 
             LOGGER.info("Starting cloudmask for scene %s", scene_stem)
-            cloudmask_path = cloudmask_tmp_dir / f"{scene_stem}_cloudmask.tif"
-            masked_stack_path = masked_tmp_dir / f"{scene_stem}_masked.tif"
 
             _run_cloudmask_and_mask(
                 stack_path=img_stack_path,
