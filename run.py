@@ -97,7 +97,7 @@ REGION_DOWNLOAD_DATES = {
 BASE_PATH = Path(
     os.environ.get(
         "SATDL_BASE_PATH",
-        os.environ.get("SATDL_HOST_DATA_PATH", "/host_data") + "/Aso/Sentinel-2",
+        os.environ.get("SATDL_HOST_DATA_PATH", "/host_data") + "/your_project/output",
     )
 )
 

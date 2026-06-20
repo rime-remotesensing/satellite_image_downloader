@@ -34,7 +34,7 @@ startday: [20230306, 20230311, 20230410]
 endday:   [20230306, 20230311, 20230410]
 ```
 
-> **FIRMS（火事データ）の注意**: 複数期間を指定した場合、FIRMS は `min(startday)` から `max(endday)` の全期間を1回で取得します。
+> **FIRMS（熱異常データ）の注意**: 複数期間を指定した場合、FIRMS は `min(startday)` から `max(endday)` の全期間を1回で取得します。
 
 ---
 
@@ -124,9 +124,9 @@ python run.py --config config/config.yaml --img-only
 
 ---
 
-## FIRMS 火事データ設定
+## FIRMS 熱異常データ設定
 
-火事データをダウンロードするには `firms.activefire_satellite` と `firms.product_map` の両方を設定してください。どちらかが未設定の場合はダウンロードされません。
+熱異常データをダウンロードするには `firms.activefire_satellite` と `firms.product_map` の両方を設定してください。どちらかが未設定の場合はダウンロードされません。
 
 ```yaml
 firms:
