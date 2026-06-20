@@ -1,26 +1,69 @@
 # satellite-image-downloader
 
-A config-driven pipeline for downloading and preprocessing satellite imagery from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/) and active fire data from [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/).
+[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/) から Sentinel-2 / Landsat 8・9 衛星画像を、[NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) から火事データを自動ダウンロード・前処理する設定ファイル駆動のパイプラインです。
 
-## Features
+## 機能
 
-- **Satellite support**: Sentinel-2 L2A and Landsat 8/9 L2
-- **AOI-based clipping**: Provide a GeoJSON polygon to clip imagery to your area of interest
-- **Automatic cloud masking**: Uses [omnicloudmask](https://github.com/DPIRD-DMA/OmniCloudMask) for accurate cloud and shadow detection
-- **Snow masking**: Optional NDSI-based snow masking
-- **Daily compositing**: Merges multiple scenes from the same date into one image
-- **Active fire data**: Downloads FIRMS MODIS/VIIRS active fire detections as Shapefiles and pixel rasters
-- **GPU acceleration**: Cloud masking runs on CUDA GPU when available
-- **Docker support**: Fully containerized environment for reproducible execution
+- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2
+- **AOI クリッピング**: GeoJSON ポリゴンで任意の領域に切り抜き
+- **自動雲マスク**: [omnicloudmask](https://github.com/DPIRD-DMA/OmniCloudMask) による雲・影マスク
+- **雪マスク**: NDSI ベースの雪マスク（オプション）
+- **同日コンポジット**: 同日の複数シーンを最小値合成で1枚に統合
+- **火事データ**: FIRMS MODIS/VIIRS の火事検知を Shapefile + ラスタで取得
+- **GPU 対応**: CUDA GPU があれば omnicloudmask の推論を高速化
+- **Docker 対応**: 依存関係を含む再現可能な実行環境
 
-## Requirements
+---
 
-- Python 3.10+
-- GDAL (system library)
-- CUDA-capable NVIDIA GPU (optional, recommended for cloud masking)
-- Docker + NVIDIA Container Toolkit (for Docker-based execution)
+## 事前準備（必読）
 
-## Installation
+### Docker + CUDA バージョンの確認
+
+GPU を使う場合、**Dockerfile に書かれた CUDA バージョンを自分の環境に合わせる必要があります**。
+合っていないとビルドは成功しても GPU が認識されません。
+
+**ステップ 1 — ホスト側の CUDA バージョンを確認する**
+
+```bash
+nvidia-smi
+```
+
+出力の右上に `CUDA Version: XX.X` と表示されます。
+
+**ステップ 2 — [env/Dockerfile](env/Dockerfile) の2行を変更する**
+
+```dockerfile
+# ① ベースイメージ: cuda バージョンをホストに合わせる
+FROM nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04
+#                 ^^^^  ここを変える
+
+# ② PyTorch ビルド: cu128 の部分をホストに合わせる
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+#                                                   ^^^^^ ここを変える
+```
+
+| ホスト CUDA | ① ベースイメージ | ② PyTorch |
+|-------------|-----------------|-----------|
+| 11.8 | `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` | `cu118` |
+| 12.1 | `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04` | `cu121` |
+| 12.4 | `nvidia/cuda:12.4.1-cudnn9-runtime-ubuntu22.04` | `cu124` |
+| 12.8 (デフォルト) | `nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04` | `cu128` |
+
+変更後はイメージを再ビルドしてください：
+
+```bash
+docker compose build downloader
+```
+
+GPU が正しく認識されているか確認：
+
+```bash
+docker compose run --rm downloader python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no GPU')"
+```
+
+---
+
+## インストール
 
 ```bash
 git clone https://github.com/your-username/satellite-image-downloader.git
@@ -28,16 +71,18 @@ cd satellite-image-downloader
 pip install -r env/requirements.txt
 ```
 
-> **Note**: GDAL must be installed on your system before installing Python packages.
+> GDAL がシステムにインストールされている必要があります。
 > - Ubuntu/Debian: `sudo apt-get install gdal-bin libgdal-dev`
 > - macOS: `brew install gdal`
-> - Windows: Use [OSGeo4W](https://trac.osgeo.org/osgeo4w/) or a conda environment.
+> - Windows: [OSGeo4W](https://trac.osgeo.org/osgeo4w/) または conda 環境を推奨
 
-## Quick Start
+---
 
-### 1. Prepare your AOI
+## クイックスタート
 
-Create a GeoJSON file containing your area of interest (Polygon or MultiPolygon) and save it as `config/area.geojson`:
+### 1. AOI ファイルを用意する
+
+対象地域を Polygon または MultiPolygon の GeoJSON で記述し、`config/area.geojson` として保存します：
 
 ```json
 {
@@ -55,9 +100,9 @@ Create a GeoJSON file containing your area of interest (Polygon or MultiPolygon)
 }
 ```
 
-### 2. Edit the config file
+### 2. 設定ファイルを編集する
 
-Edit `config/config.yaml`:
+`config/config.yaml` を編集します：
 
 ```yaml
 geojson: ./config/area.geojson
@@ -68,27 +113,33 @@ satellite:
 output: ./output
 ```
 
-See [Configuration Reference](docs/configuration.md) for all available options.
+設定項目の詳細は [設定リファレンス](docs/configuration.md) を参照してください。
 
-### 3. Set up your FIRMS API key (for active fire data)
+### 3. FIRMS API キーを設定する（火事データが必要な場合）
 
-Register for a free key at <https://firms.modaps.eosdis.nasa.gov/api/> and create `key.env` in the project root:
+<https://firms.modaps.eosdis.nasa.gov/api/> で無料登録し、`key.env` をプロジェクトルートに作成：
 
 ```
 FIRMS_API_KEY=your_api_key_here
 ```
 
-> `key.env` is excluded from git by `.gitignore` — your key will not be committed.
+> `key.env` は `.gitignore` で除外されているためコミットされません。
 
-### 4. Run
+### 4. 実行する
 
 ```bash
+# ローカル実行
 python run.py --config config/config.yaml
+
+# Docker 実行
+docker compose run --rm downloader python3 run.py --config config/config.yaml
 ```
+
+---
 
 ## Python API
 
-You can call the pipeline directly from Python for programmatic use:
+スクリプトから直接呼び出すこともできます：
 
 ```python
 from src.pipeline import satellite_image_downloader
@@ -102,9 +153,7 @@ satellite_image_downloader(
 )
 ```
 
-### Multiple date ranges
-
-Pass lists to `sdate` / `edate` to process several date windows in sequence:
+**複数日付をまとめてループ実行する**（`sdate`/`edate` を配列で渡す）：
 
 ```python
 satellite_image_downloader(
@@ -116,9 +165,7 @@ satellite_image_downloader(
 )
 ```
 
-### Multiple regions
-
-Loop over a list of regions to download each one in turn:
+**複数リージョンをループ実行する**：
 
 ```python
 regions = [
@@ -136,18 +183,14 @@ for r in regions:
     )
 ```
 
-You can also edit `BATCH_MODE_REGIONS` and `REGION_DOWNLOAD_DATES` in `run.py` and run:
+---
 
-```bash
-python run.py --batch
-```
+## run.py のカスタマイズ（バッチダウンロード）
 
-## Customizing run.py for batch downloads
+`run.py` はファイルを直接編集して自分のダウンロード計画に合わせて使うことを想定しています。
+変更する箇所は冒頭の3つの変数です。
 
-`run.py` is designed to be edited directly for your own data download plan.
-The three variables to configure are at the top of the file:
-
-### 1. `BATCH_MODE_REGIONS` — list of regions and their GeoJSON files
+### 1. `BATCH_MODE_REGIONS` — リージョンと GeoJSON の対応表
 
 ```python
 BATCH_MODE_REGIONS = [
@@ -156,9 +199,9 @@ BATCH_MODE_REGIONS = [
 ]
 ```
 
-Each tuple is `(region_name, path_to_geojson)`. Create one GeoJSON per area of interest and list them here.
+タプルは `(リージョン名, GeoJSON パス)` です。対象地域ごとに GeoJSON を作成してここに列挙します。
 
-### 2. `REGION_DOWNLOAD_DATES` — dates to download per region
+### 2. `REGION_DOWNLOAD_DATES` — 日付の設定
 
 ```python
 REGION_DOWNLOAD_DATES = {
@@ -172,9 +215,9 @@ REGION_DOWNLOAD_DATES = {
 }
 ```
 
-Each date is processed as a single-day window (`startday == endday`). Add as many years and dates as needed.
+各日付は `startday == endday` の1日単位で処理されます。年をキーにしてまとめると管理しやすいです。
 
-### 3. `BASE_PATH` — root output directory
+### 3. `BASE_PATH` — 出力先ルートディレクトリ
 
 ```python
 BASE_PATH = Path(
@@ -185,63 +228,69 @@ BASE_PATH = Path(
 )
 ```
 
-Change the fallback path (`/host_data/your_project/output`) to your preferred output location, or set it at runtime via the `SATDL_BASE_PATH` environment variable (see [Docker Guide](docs/docker.md)).
+フォールバックパス（`/host_data/your_project/output` の部分）を自分の出力先に変更するか、環境変数 `SATDL_BASE_PATH` で実行時に指定します。
 
-Output is saved to `<BASE_PATH>/<region_name>/<year>/`.
+出力は `<BASE_PATH>/<リージョン名>/<年>/` に保存されます。
 
-### Running batch mode
+### バッチ実行
 
 ```bash
-# Local
+# ローカル
 python run.py --batch
 
 # Docker
 docker compose run --rm downloader python3 run.py --batch
 
-# Regenerate img/ only (skip re-masking)
+# img/ のみ再生成（クラウドマスク等はスキップ）
 python run.py --batch --img-only
 ```
 
-## Output Structure
+---
+
+## 出力ディレクトリ構成
 
 ```
 output/
 ├── sentinel2/
-│   ├── img/              # Raw scene stacks (one multi-band TIFF per scene)
-│   ├── masked/           # Cloud-masked daily composites
-│   ├── snowmasked/       # Cloud + snow masked daily composites
-│   └── cloudmask/        # Cloud and snow mask layers
+│   ├── img/              # 生データ（シーン単位のマルチバンド TIFF）
+│   ├── masked/           # 雲マスク適用済み（同日コンポジット）
+│   ├── snowmasked/       # 雲+雪マスク適用済み（同日コンポジット）
+│   └── cloudmask/        # 雲マスク・雪マスクレイヤ
 ├── landsat89/
 │   ├── img/
 │   ├── masked/
 │   ├── snowmasked/
 │   └── cloudmask/
 ├── modis/
-│   ├── activefire/       # MODIS active fire Shapefiles
-│   └── activefire_tif/   # MODIS active fire pixel rasters
+│   ├── activefire/       # MODIS 火事 Shapefile
+│   └── activefire_tif/   # MODIS 火事ピクセルラスタ
 └── viirs/
-    ├── activefire/       # VIIRS active fire Shapefiles
-    └── activefire_tif/   # VIIRS active fire pixel rasters
+    ├── activefire/       # VIIRS 火事 Shapefile
+    └── activefire_tif/   # VIIRS 火事ピクセルラスタ
 ```
 
-> `img/` stores raw per-scene data. All other directories store daily composites (scenes from the same date are merged).
-> When `metadata.enabled: true`, a GeoJSON file with acquisition metadata is also saved under `img/`.
+> `img/` はシーン単位の生データを保存します。それ以外（`masked` / `snowmasked` / `cloudmask`）は同日コンポジット後の結果です。
+> `metadata.enabled: true` にすると、撮影メタデータ GeoJSON が `img/` 配下に保存されます。
 
-## Docker
+---
 
-See the [Docker Guide](docs/docker.md) for containerized execution, GPU setup, and batch processing.
+## Docker での実行
 
-## Configuration Reference
+詳細は [Docker ガイド](docs/docker.md) を参照してください（CUDA バージョン変更・外部パスマウント・バッチ実行・モデルキャッシュ）。
 
-See the [Configuration Reference](docs/configuration.md) for every available option.
+## 設定リファレンス
 
-## Technical Notes
+`config/config.yaml` の全オプションは [設定リファレンス](docs/configuration.md) を参照してください。
 
-- **Sentinel-2 processing baseline**: Scenes with `s2:processing_baseline >= 4.0` are automatically corrected by subtracting the `RADIO_ADD_OFFSET` (1000 DN). Reflectance conversion (÷10000) is applied in the masked/snowmasked outputs.
-- **FIRMS request limits**: The FIRMS area API allows a maximum day range of 1–5 per request. Longer periods are automatically split and merged internally.
-- **Active fire CRS**: Output CRS matches the Sentinel-2 image CRS for the AOI (falls back to EPSG:4326 if not available).
-- **Model caching**: On first run, omnicloudmask downloads its model weights from Hugging Face. Subsequent runs use the cached weights (see [Docker Guide](docs/docker.md) for volume caching).
+---
 
-## License
+## 補足
 
-MIT License — see [LICENSE](LICENSE) for details.
+- **Sentinel-2 処理基準**: `s2:processing_baseline >= 4.0` のシーンは `RADIO_ADD_OFFSET`（1000 DN）を自動補正します。反射率変換（÷10000）は `masked`/`snowmasked` 等の後段で適用します。
+- **FIRMS リクエスト制限**: FIRMS area API は1リクエストあたり最大5日間です。長い期間は内部で自動分割して取得・統合します。
+- **火事データの CRS**: AOI に対応する Sentinel-2 画像の CRS に合わせます（判定できない場合は EPSG:4326）。
+- **モデルキャッシュ**: 初回実行時に omnicloudmask がモデルをダウンロードします。Docker では名前付きボリュームにキャッシュされるため、2回目以降は再ダウンロード不要です。
+
+## ライセンス
+
+MIT License
