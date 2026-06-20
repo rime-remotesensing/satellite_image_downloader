@@ -1,74 +1,59 @@
-# Docker Guide
+# Docker ガイド
 
-This project includes a Docker setup for reproducible, GPU-accelerated execution. The container bundles Python, GDAL, and all Python dependencies.
+再現可能な GPU 対応実行環境として Docker Compose を提供しています。Python・GDAL・全依存パッケージがコンテナに含まれています。
 
-## Prerequisites
+---
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/Mac) or Docker Engine (Linux)
-- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU support
+## 事前準備
 
-## Matching the CUDA version to your GPU
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Windows/Mac）または Docker Engine（Linux）
+- GPU を使う場合: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
-> **Important**: The Dockerfile is pinned to CUDA 12.8 and the matching PyTorch build.
-> If your host GPU driver supports a different CUDA version, you must update two lines in [env/Dockerfile](../env/Dockerfile) before building.
+---
 
-Open `env/Dockerfile` and change these two lines to match your installed CUDA version:
+## CUDA バージョンの合わせ方（GPU 使用時は必須）
 
-```dockerfile
-# Line 1 — base image: change "12.8.1-cudnn8-runtime-ubuntu22.04" to match your driver
-FROM nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04
+> GPU を使う場合、**Dockerfile の CUDA バージョンをホスト環境に合わせる必要があります**。
+> 合っていないと `torch.cuda.is_available()` が `False` になり CPU で動作します。
 
-# Line 2 — PyTorch index: change "cu128" to match (e.g. cu118, cu121, cu124, cu128)
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
-```
-
-**How to check your supported CUDA version:**
+### ステップ 1 — ホストの CUDA バージョンを確認
 
 ```bash
 nvidia-smi
 ```
 
-Look for `CUDA Version: XX.X` in the output. Then:
+右上の `CUDA Version: XX.X` を確認します。
 
-| Host CUDA version | Base image tag | PyTorch index suffix |
-|-------------------|----------------|----------------------|
+### ステップ 2 — [env/Dockerfile](../env/Dockerfile) を編集
+
+```dockerfile
+# ① ベースイメージの CUDA バージョンを変える
+FROM nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04
+#                 ^^^^  ← ここを変える
+
+# ② PyTorch ビルドを合わせる
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+#                                                   ^^^^^ ← ここを変える
+```
+
+| ホスト CUDA | ① ベースイメージタグ | ② PyTorch サフィックス |
+|-------------|--------------------|-----------------------|
 | 11.8 | `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` | `cu118` |
 | 12.1 | `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04` | `cu121` |
 | 12.4 | `nvidia/cuda:12.4.1-cudnn9-runtime-ubuntu22.04` | `cu124` |
-| 12.8 (default) | `nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04` | `cu128` |
+| 12.8（デフォルト） | `nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04` | `cu128` |
 
-Available PyTorch builds: <https://download.pytorch.org/whl/torch/>
-Available CUDA base images: <https://hub.docker.com/r/nvidia/cuda/tags>
+参考リンク:
+- PyTorch ビルド一覧: <https://download.pytorch.org/whl/torch/>
+- CUDA ベースイメージ一覧: <https://hub.docker.com/r/nvidia/cuda/tags>
 
-After editing, rebuild the image:
-
-```bash
-docker compose build downloader
-```
-
-## Build the image
-
-Run this once (or after updating `env/Dockerfile` or `env/requirements.txt`):
+### ステップ 3 — イメージを再ビルド
 
 ```bash
 docker compose build downloader
 ```
 
-## Basic usage
-
-Run with a config file:
-
-```bash
-docker compose run --rm downloader python3 run.py --config config/config.yaml
-```
-
-The default `command` in `docker-compose.yml` also points to this config, so you can just run:
-
-```bash
-docker compose run --rm downloader
-```
-
-## Verify GPU access
+### GPU 認識の確認
 
 ```bash
 docker compose run --rm downloader python3 -c "
@@ -80,13 +65,31 @@ if torch.cuda.is_available():
 "
 ```
 
-## Output to a directory outside the project
+---
 
-By default, the project directory is mounted at `/workspace` inside the container, and relative paths like `./output` in your config resolve to `/workspace/output` on the host.
+## 基本的な使い方
 
-To write output to a different host directory, set `SATDL_HOST_DATA_PATH` to that path. It will be mounted at `/host_data` inside the container.
+設定ファイルを指定して実行：
 
-**Linux / macOS (bash):**
+```bash
+docker compose run --rm downloader python3 run.py --config config/config.yaml
+```
+
+`docker-compose.yml` のデフォルト `command` も同じ設定を指しているため、以下でも動作します：
+
+```bash
+docker compose run --rm downloader
+```
+
+---
+
+## プロジェクト外のディレクトリに出力する
+
+デフォルトではプロジェクトディレクトリが `/workspace` にマウントされ、`./output` のような相対パスはそこを基準に解決されます。
+
+別のホストディレクトリに出力する場合は、`SATDL_HOST_DATA_PATH` にそのパスを設定します。コンテナ内の `/host_data` にマウントされます。
+
+**Linux / macOS:**
 
 ```bash
 SATDL_HOST_DATA_PATH=/path/to/your/data \
@@ -104,85 +107,77 @@ docker compose run --rm `
   downloader python3 run.py --config config/config.yaml
 ```
 
-In your `config/config.yaml`, reference the container-side path:
+`config/config.yaml` ではコンテナ側のパスを指定します：
 
 ```yaml
 geojson: /host_data/config/area.geojson
 output:  /host_data/my_project/output
 ```
 
-## Model caching
+---
 
-On the first run, omnicloudmask downloads its model weights from Hugging Face. This can take a few minutes. The Docker Compose file persists these caches in named volumes so subsequent runs start immediately:
+## モデルキャッシュ
 
-| Volume | Contents |
-|--------|----------|
-| `satdl_model_cache` | Hugging Face and PyTorch caches (`~/.cache`) |
-| `satdl_model_data` | omnicloudmask model weights (`~/.local/share`) |
+初回実行時、omnicloudmask が Hugging Face からモデルをダウンロードします（数分かかる場合があります）。
+Docker Compose では名前付きボリュームでキャッシュを永続化しているため、2回目以降は再ダウンロードを省略できます。
 
-To force a re-download (clears both volumes):
+| ボリューム | 内容 |
+|-----------|------|
+| `satdl_model_cache` | Hugging Face / PyTorch キャッシュ（`~/.cache`） |
+| `satdl_model_data` | omnicloudmask のモデル本体（`~/.local/share`） |
+
+キャッシュをクリアして再取得したい場合：
 
 ```bash
 docker volume rm satellite_image_downloader_satdl_model_cache
 docker volume rm satellite_image_downloader_satdl_model_data
 ```
 
-## Batch mode
+---
 
-Batch mode downloads imagery for multiple regions and date ranges defined in `run.py`.
+## バッチモード
 
-Edit `BATCH_MODE_REGIONS` and `REGION_DOWNLOAD_DATES` in `run.py` to match your regions and dates:
-
-```python
-BATCH_MODE_REGIONS = [
-    ("region_a", "config/region_a.geojson"),
-    ("region_b", "config/region_b.geojson"),
-]
-
-REGION_DOWNLOAD_DATES = {
-    "region_a": {
-        "2024": ["20240101", "20240115", "20240201"],
-    },
-    "region_b": {
-        "2024": ["20240101", "20240201"],
-    },
-}
-```
-
-Then run:
+複数リージョン・複数日付を一括ダウンロードするバッチモードです。
+`run.py` の `BATCH_MODE_REGIONS` と `REGION_DOWNLOAD_DATES` を自分の用途に合わせて編集してから実行します（詳細は [README](../README.md#runpy-のカスタマイズバッチダウンロード) 参照）。
 
 ```bash
-# Local
+# ローカル
 python run.py --batch
 
 # Docker
 docker compose run --rm downloader python3 run.py --batch
 ```
 
-To control the output root directory in batch mode, set `SATDL_BASE_PATH`:
+出力先をバッチモードで変更する場合（`SATDL_BASE_PATH` を環境変数で指定）：
+
+**Linux / macOS:**
 
 ```bash
-# Linux / macOS
 SATDL_HOST_DATA_PATH=/path/to/data \
 docker compose run --rm \
   -e SATDL_BASE_PATH=/host_data/output \
   downloader python3 run.py --batch
+```
 
-# Windows PowerShell
+**Windows (PowerShell):**
+
+```powershell
 $env:SATDL_HOST_DATA_PATH = "D:\your\data"
 docker compose run --rm `
   -e SATDL_BASE_PATH=/host_data/output `
   downloader python3 run.py --batch
 ```
 
-Output is saved to `<SATDL_BASE_PATH>/<region_name>/<year>/`.
+出力は `<SATDL_BASE_PATH>/<リージョン名>/<年>/` に保存されます。
 
-## Path summary
+---
 
-| Scenario | Path in config.yaml |
-|----------|---------------------|
-| Output within project directory | `./output` |
-| Output on a different host drive (Docker) | `/host_data/...` (set `SATDL_HOST_DATA_PATH` on host) |
-| Output on a different host drive (local) | Absolute path, e.g. `/data/output` or `D:\data\output` |
+## パスのまとめ
 
-> When using Docker, paths in `config.yaml` must use the **container-side** path (`/host_data/...`), not the host path.
+| 実行方法 | config.yaml でのパス指定 |
+|---------|------------------------|
+| プロジェクト内に出力 | `./output` |
+| Docker で別ドライブに出力 | `/host_data/...`（`SATDL_HOST_DATA_PATH` をホストで設定） |
+| ローカルで別ドライブに出力 | 絶対パス（例: `/data/output` や `D:\data\output`） |
+
+> Docker 実行時は `config.yaml` 内のパスをコンテナ側のパス（`/host_data/...`）で指定してください。ホスト側のパスはコンテナから見えません。

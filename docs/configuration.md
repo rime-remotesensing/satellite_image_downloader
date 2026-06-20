@@ -1,6 +1,6 @@
-# Configuration Reference
+# 設定リファレンス
 
-All settings are defined in a YAML file (default: `config/config.yaml`) and passed to the pipeline via:
+設定はすべて YAML ファイル（デフォルト: `config/config.yaml`）に記述し、以下で実行します：
 
 ```bash
 python run.py --config config/config.yaml
@@ -8,73 +8,73 @@ python run.py --config config/config.yaml
 
 ---
 
-## Core Inputs
+## 基本入力
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `geojson` | string | Path to a GeoJSON file (Polygon or MultiPolygon) defining the area of interest (AOI) |
-| `startday` | string \| list | Start date(s) in `YYYYMMDD` format |
-| `endday` | string \| list | End date(s) in `YYYYMMDD` format |
-| `satellite` | list | Satellites to process. Options: `sentinel2`, `landsat89`, `modis`, `viirs` |
-| `output` | string | Root directory for all outputs |
+| キー | 型 | 説明 |
+|------|----|------|
+| `geojson` | string | AOI を定義する GeoJSON ファイルのパス（Polygon または MultiPolygon） |
+| `startday` | string \| list | 開始日（`YYYYMMDD` 形式） |
+| `endday` | string \| list | 終了日（`YYYYMMDD` 形式） |
+| `satellite` | list | 処理対象の衛星。選択肢: `sentinel2`, `landsat89`, `modis`, `viirs` |
+| `output` | string | 出力のルートディレクトリ |
 
-### Single date range
+### 単一期間の指定
 
 ```yaml
 startday: "20240101"
 endday:   "20240131"
 ```
 
-### Multiple date ranges (sequential loop)
+### 複数期間の指定（順番にループ実行）
 
-Provide arrays of equal length. Each pair is processed independently:
+同じ長さの配列で指定します。各ペアが独立して処理されます：
 
 ```yaml
 startday: [20230306, 20230311, 20230410]
 endday:   [20230306, 20230311, 20230410]
 ```
 
-> **Active fire (FIRMS)**: When multiple date ranges are specified, FIRMS data is fetched once for the span from `min(startday)` to `max(endday)`.
+> **FIRMS（火事データ）の注意**: 複数期間を指定した場合、FIRMS は `min(startday)` から `max(endday)` の全期間を1回で取得します。
 
 ---
 
-## Band Selection
+## バンド選択
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `band` | string | `all` | `all` = all bands; `at` = specific bands listed in `num` |
-| `num` | list | `[]` | Band numbers to download when `band: at` (e.g. `[2, 3, 4, 8]`) |
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `band` | string | `all` | `all` = 全バンド、`at` = `num` で指定したバンドのみ |
+| `num` | list | `[]` | `band: at` のときに取得するバンド番号（例: `[2, 3, 4, 8]`） |
 
-> Bands required by omnicloudmask are always downloaded regardless of `num`.
+> omnicloudmask に必要なバンドは `num` の指定に関わらず常にダウンロードされます。
 
 ---
 
-## Cloud Masking
+## 雲マスク
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `cloudmask` | list | `[1, 3]` | Cloud classes to mask. `1` = thick cloud, `2` = thin cloud, `3` = shadow |
-| `max_cloud_cover` | int | `80` | Skip scenes with cloud cover above this percentage (STAC metadata filter) |
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `cloudmask` | list | `[1, 3]` | マスク対象の雲クラス。`1` = 厚雲、`2` = 薄雲、`3` = 影 |
+| `max_cloud_cover` | int | `80` | この雲被覆率（%）を超えるシーンはスキップ（STAC メタデータによるフィルタ） |
 
-### omnicloudmask inference options
+### omnicloudmask の推論設定
 
 ```yaml
 omnicloudmask:
   batch_size: 1
   patch_size: 1000
   patch_overlap: 300
-  device: cuda     # "cuda" or "cpu"
+  device: cuda     # "cuda" または "cpu"
 ```
 
 ---
 
-## Snow Masking
+## 雪マスク
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `snowmask.enabled` | bool | `false` | Apply snow masking after cloud masking |
-| `snowmask.ndsi_threshold` | float | `0.4` | NDSI threshold for snow detection |
-| `snowmask.red_threshold` | float | `0.2` | Red band reflectance threshold for snow detection |
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `snowmask.enabled` | bool | `false` | 雲マスクの後に雪マスク処理を行うか |
+| `snowmask.ndsi_threshold` | float | `0.4` | 雪と判定する NDSI 閾値 |
+| `snowmask.red_threshold` | float | `0.2` | 雪と判定する赤バンド反射率閾値 |
 
 ```yaml
 snowmask:
@@ -85,38 +85,38 @@ snowmask:
 
 ---
 
-## Acquisition Metadata
+## 撮影メタデータ
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `metadata.enabled` | bool | `false` | Save acquisition metadata as a GeoJSON file under `img/` |
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `metadata.enabled` | bool | `false` | 撮影メタデータを `img/` 配下に GeoJSON で保存するか |
 
-Saved fields: `Acquisition_Date`, `Image_ID`, `Solar_Azimuth_Angle`, `Solar_Zenith_Angle`.
+保存されるフィールド: `Acquisition_Date`, `Image_ID`, `Solar_Azimuth_Angle`, `Solar_Zenith_Angle`
 
 ---
 
-## GEE Compatibility (Sentinel-2)
+## GEE 互換オプション（Sentinel-2）
 
-These options align the output grid with Google Earth Engine exports.
+Google Earth Engine エクスポートとグリッドを合わせるためのオプションです。
 
 ```yaml
 gee_compatible:
   enabled: true
-  output_crs: EPSG:32652   # Target CRS (UTM zone matching your AOI)
-  aoi_as_bbox: true        # Use AOI bounding box (like ee.Geometry.Rectangle)
-  snap_grid: true          # Snap output to pixel-aligned coordinates
+  output_crs: EPSG:32652   # 出力 CRS（AOI に合わせた UTM ゾーン）
+  aoi_as_bbox: true        # AOI のバウンディングボックスを使う（ee.Geometry.Rectangle 相当）
+  snap_grid: true          # ピクセルアラインメントにスナップ
 ```
 
 ---
 
-## File Handling
+## ファイル処理オプション
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `file_exists` | string | `skip` | What to do if an output file already exists. `skip` = keep existing, `overwrite` = re-process |
-| `img_only` | bool | `false` | Only (re)generate `img/` scene stacks and metadata; skip cloud/snow masking |
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `file_exists` | string | `skip` | 出力ファイルが既にある場合の動作。`skip` = スキップ、`overwrite` = 上書き |
+| `img_only` | bool | `false` | `img/` のみ（再）生成し、雲・雪マスクはスキップ |
 
-CLI equivalent of `img_only`:
+CLI で `img_only` を指定する場合：
 
 ```bash
 python run.py --config config/config.yaml --img-only
@@ -124,55 +124,55 @@ python run.py --config config/config.yaml --img-only
 
 ---
 
-## FIRMS Active Fire Settings
+## FIRMS 火事データ設定
 
-To download active fire data, set `firms.activefire_satellite` **and** the corresponding `firms.product_map` entries. If either is missing, active fire data is not downloaded.
+火事データをダウンロードするには `firms.activefire_satellite` と `firms.product_map` の両方を設定してください。どちらかが未設定の場合はダウンロードされません。
 
 ```yaml
 firms:
-  key_env_path: ./key.env          # Path to the file containing FIRMS_API_KEY
-  api_key: ""                       # Alternative: set the key directly (not recommended)
+  key_env_path: ./key.env          # FIRMS_API_KEY を記載したファイルのパス
+  api_key: ""                       # 直接書く場合（非推奨）
   activefire_satellite:
     - viirs
     - modis
   product_map:
     modis:
-      - MODIS_SP                    # Terra + Aqua combined standard product
+      - MODIS_SP                    # Terra + Aqua 統合標準プロダクト
     viirs:
       - VIIRS_SNPP_SP               # Suomi-NPP
       - VIIRS_NOAA20_SP             # NOAA-20
       - VIIRS_NOAA21_SP             # NOAA-21
 ```
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `firms.key_env_path` | string | `./key.env` | Path to the `.env` file with `FIRMS_API_KEY=...` |
-| `firms.activefire_satellite` | list | — | Satellites to fetch. Options: `modis`, `viirs` |
-| `firms.product_map.modis` | string \| list | — | MODIS product(s). `MODIS_SP` covers Terra/Aqua |
-| `firms.product_map.viirs` | string \| list | — | VIIRS product(s). Use per-sensor names (e.g. `VIIRS_SNPP_SP`) |
-| `firms.days` | int | `5` | Day range per FIRMS API request (1–5). Longer periods are split automatically |
-| `firms.bbox_buffer_m` | int | `5000` | Expand the AOI bounding box by this distance (meters) when querying FIRMS |
-| `firms.clip_to_aoi` | bool | `false` | Clip FIRMS output to the AOI polygon after download |
-| `firms.pixel_tif` | bool | `false` | Also output active fire as a pixel-raster GeoTIFF |
-| `firms.pixel_resolution` | int | `10` | Resolution of the pixel raster in meters |
-| `firms.pixel_expand_to_detections` | bool | `true` | Expand the raster extent if detections fall outside the AOI grid |
-| `firms.period_summary` | bool | `false` | Output one merged Shapefile covering the entire date range |
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `firms.key_env_path` | string | `./key.env` | `FIRMS_API_KEY=...` を記載した `.env` ファイルのパス |
+| `firms.activefire_satellite` | list | — | 取得対象衛星。`modis`, `viirs` から選択 |
+| `firms.product_map.modis` | string \| list | — | MODIS プロダクト。`MODIS_SP` は Terra/Aqua 統合 |
+| `firms.product_map.viirs` | string \| list | — | VIIRS プロダクト。センサ別に指定（例: `VIIRS_SNPP_SP`） |
+| `firms.days` | int | `5` | 1リクエストあたりの日数（1〜5）。長い期間は自動分割 |
+| `firms.bbox_buffer_m` | int | `5000` | FIRMS 取得時に AOI バウンディングボックスを広げる距離（m） |
+| `firms.clip_to_aoi` | bool | `false` | 取得後に AOI ポリゴンでクリップするか |
+| `firms.pixel_tif` | bool | `false` | 火事データをピクセルラスタ GeoTIFF でも出力するか |
+| `firms.pixel_resolution` | int | `10` | ピクセルラスタの解像度（m） |
+| `firms.pixel_expand_to_detections` | bool | `true` | 検知点がグリッド外に出る場合にラスタ範囲を自動拡張するか |
+| `firms.period_summary` | bool | `false` | 期間全体をまとめた1つの Shapefile も出力するか |
 
-### Getting a FIRMS API key
+### FIRMS API キーの取得
 
-1. Register at <https://firms.modaps.eosdis.nasa.gov/api/>
-2. Copy your MAP_KEY
-3. Create `key.env` in the project root:
+1. <https://firms.modaps.eosdis.nasa.gov/api/> で無料登録
+2. MAP_KEY を取得
+3. プロジェクトルートに `key.env` を作成：
 
 ```
 FIRMS_API_KEY=your_map_key_here
 ```
 
-> Do **not** put the key directly into `config.yaml`. The `key.env` file is excluded from git by `.gitignore`.
+> `key.env` は `.gitignore` に含まれているためリポジトリにコミットされません。`config.yaml` には直接書かないでください。
 
 ---
 
-## Full Example
+## 設定ファイルの全例
 
 ```yaml
 geojson: ./config/area.geojson
