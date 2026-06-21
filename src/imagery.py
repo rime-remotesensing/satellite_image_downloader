@@ -464,63 +464,80 @@ def _build_grid_for_item(
         raise ValueError(f"No raster assets found in item: {item.id}")
 
     LOGGER.info("Preparing grid for item %s", item.id)
-    href = planetary_computer.sign(first_asset.href)
-    LOGGER.debug("Opening asset href=%s for item=%s", href, getattr(item, "id", None))
-    with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
-        if src.crs is None:
-            raise ValueError(f"Asset has no CRS: {first_asset.href}")
+    _grid_max_retries = 3
+    for _grid_attempt in range(1, _grid_max_retries + 1):
+        try:
+            href = planetary_computer.sign(_strip_sas(first_asset.href))
+            with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
+                if src.crs is None:
+                    raise ValueError(f"Asset has no CRS: {first_asset.href}")
 
-        target_crs = src.crs
-        if output_crs_override:
-            target_crs = rasterio.crs.CRS.from_string(output_crs_override)
+                target_crs = src.crs
+                if output_crs_override:
+                    target_crs = rasterio.crs.CRS.from_string(output_crs_override)
 
-        if use_bbox_extent:
-            west, south, east, north = _bbox_from_geometry(geometry_wgs84)
-            bbox_geom_wgs84 = {
-                "type": "Polygon",
-                "coordinates": [[
-                    [west, south],
-                    [east, south],
-                    [east, north],
-                    [west, north],
-                    [west, south],
-                ]],
-            }
-            geom_in_item_crs = transform_geom(
-                "EPSG:4326",
-                target_crs.to_string(),
-                bbox_geom_wgs84,
-                precision=6,
+                if use_bbox_extent:
+                    west, south, east, north = _bbox_from_geometry(geometry_wgs84)
+                    bbox_geom_wgs84 = {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [west, south],
+                            [east, south],
+                            [east, north],
+                            [west, north],
+                            [west, south],
+                        ]],
+                    }
+                    geom_in_item_crs = transform_geom(
+                        "EPSG:4326",
+                        target_crs.to_string(),
+                        bbox_geom_wgs84,
+                        precision=6,
+                    )
+                else:
+                    geom_in_item_crs = transform_geom(
+                        "EPSG:4326",
+                        target_crs.to_string(),
+                        geometry_wgs84,
+                        precision=6,
+                    )
+
+                left, bottom, right, top = geometry_bounds(geom_in_item_crs)
+
+                if snap_to_resolution_grid:
+                    left = math.floor(left / target_resolution) * target_resolution
+                    bottom = math.floor(bottom / target_resolution) * target_resolution
+                    right = math.ceil(right / target_resolution) * target_resolution
+                    top = math.ceil(top / target_resolution) * target_resolution
+
+                width = max(1, int(math.ceil((right - left) / target_resolution)))
+                height = max(1, int(math.ceil((top - bottom) / target_resolution)))
+                transform = from_origin(left, top, target_resolution, target_resolution)
+                profile_template = {
+                    "driver": "GTiff",
+                    "dtype": "float32",
+                    "crs": target_crs,
+                    "transform": transform,
+                    "width": width,
+                    "height": height,
+                    "compress": "lzw",
+                    "nodata": 0.0,
+                }
+            break
+        except Exception as exc:
+            if _grid_attempt == _grid_max_retries:
+                raise
+            _wait = 10 * _grid_attempt
+            LOGGER.warning(
+                "Grid build failed for item %s (attempt %s/%s): %s — retrying in %ss",
+                item.id, _grid_attempt, _grid_max_retries, exc, _wait,
             )
-        else:
-            geom_in_item_crs = transform_geom(
-                "EPSG:4326",
-                target_crs.to_string(),
-                geometry_wgs84,
-                precision=6,
-            )
-
-        left, bottom, right, top = geometry_bounds(geom_in_item_crs)
-
-        if snap_to_resolution_grid:
-            left = math.floor(left / target_resolution) * target_resolution
-            bottom = math.floor(bottom / target_resolution) * target_resolution
-            right = math.ceil(right / target_resolution) * target_resolution
-            top = math.ceil(top / target_resolution) * target_resolution
-
-        width = max(1, int(math.ceil((right - left) / target_resolution)))
-        height = max(1, int(math.ceil((top - bottom) / target_resolution)))
-        transform = from_origin(left, top, target_resolution, target_resolution)
-        profile_template = {
-            "driver": "GTiff",
-            "dtype": "float32",
-            "crs": target_crs,
-            "transform": transform,
-            "width": width,
-            "height": height,
-            "compress": "lzw",
-            "nodata": 0.0,
-        }
+            try:
+                import planetary_computer.sas as _pc_sas
+                _pc_sas.TOKEN_CACHE.clear()
+            except Exception:
+                pass
+            time.sleep(_wait)
 
     LOGGER.info("Prepared grid for item %s", item.id)
     return geom_in_item_crs, transform, width, height, profile_template
