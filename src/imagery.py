@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 import numpy as np
 import planetary_computer
@@ -41,6 +42,23 @@ from .constants import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+_SAS_PARAMS = {"st", "se", "sp", "sv", "sr", "sig", "skoid", "sktid", "skt", "ske", "sks", "skv"}
+
+
+def _strip_sas(url: str) -> str:
+    """Remove Azure SAS query parameters so planetary_computer.sign() always fetches a fresh token.
+
+    PC's STAC API returns pre-signed hrefs. sign_url() detects 'st/se/sp' and returns the URL
+    unchanged, so expired pre-signed URLs are never refreshed without this step.
+    """
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    if not (_SAS_PARAMS & set(qs)):
+        return url
+    clean_qs = {k: v for k, v in qs.items() if k not in _SAS_PARAMS}
+    from urllib.parse import urlencode
+    return urlunparse(parsed._replace(query=urlencode({k: v[0] for k, v in clean_qs.items()})))
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +564,7 @@ def _download_item_stack(
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                href = planetary_computer.sign(asset.href)
+                href = planetary_computer.sign(_strip_sas(asset.href))
                 with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
                     with WarpedVRT(
                         src,
