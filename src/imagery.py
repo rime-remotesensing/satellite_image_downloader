@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 from collections import defaultdict
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
@@ -577,24 +578,39 @@ def _download_item_stack(
 
         LOGGER.info("Reading band %s (%s) for item %s", band_number, label, item.id)
         resampling = Resampling.nearest  # Match GEE default (nearest neighbor)
+        _BAND_READ_TIMEOUT = 90  # seconds; Python-level guard against GDAL libcurl hangs
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
                 href = planetary_computer.sign(_strip_sas(asset.href))
-                with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
-                    with WarpedVRT(
-                        src,
-                        crs=profile_template["crs"],
-                        transform=transform,
-                        width=width,
-                        height=height,
-                        resampling=resampling,
-                        nodata=0,
-                    ) as vrt:
-                        arr = vrt.read(1).astype(np.float32)
-                        valid_mask = vrt.read_masks(1) > 0
-                        arr[~valid_mask] = 0.0
+
+                def _do_read(_href=href):
+                    with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(_href) as src:
+                        with WarpedVRT(
+                            src,
+                            crs=profile_template["crs"],
+                            transform=transform,
+                            width=width,
+                            height=height,
+                            resampling=resampling,
+                            nodata=0,
+                        ) as vrt:
+                            _arr = vrt.read(1).astype(np.float32)
+                            _mask = vrt.read_masks(1) > 0
+                            _arr[~_mask] = 0.0
+                    return _arr
+
+                _ex = ThreadPoolExecutor(max_workers=1)
+                _fut = _ex.submit(_do_read)
+                try:
+                    arr = _fut.result(timeout=_BAND_READ_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    _ex.shutdown(wait=False)
+                    raise RuntimeError(
+                        f"Band {label} read timed out after {_BAND_READ_TIMEOUT}s"
+                    )
+                _ex.shutdown(wait=False)
                 break
             except Exception as exc:
                 if attempt == max_retries:
