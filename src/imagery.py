@@ -569,6 +569,11 @@ def _download_item_stack(
                     "Band %s (%s) read failed (attempt %s/%s): %s — retrying in %ss",
                     band_number, label, attempt, max_retries, exc, wait,
                 )
+                try:
+                    import planetary_computer.sas as _pc_sas
+                    _pc_sas.TOKEN_CACHE.clear()
+                except Exception:
+                    pass
                 time.sleep(wait)
         LOGGER.info("Finished band %s (%s) for item %s", band_number, label, item.id)
 
