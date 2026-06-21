@@ -5,6 +5,7 @@ import logging
 import math
 import re
 import shutil
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
@@ -540,22 +541,35 @@ def _download_item_stack(
             raise ValueError(f"Missing asset '{asset_key}' for item {item.id}")
 
         LOGGER.info("Reading band %s (%s) for item %s", band_number, label, item.id)
-        href = planetary_computer.sign(asset.href)
         resampling = Resampling.nearest  # Match GEE default (nearest neighbor)
 
-        with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
-            with WarpedVRT(
-                src,
-                crs=profile_template["crs"],
-                transform=transform,
-                width=width,
-                height=height,
-                resampling=resampling,
-                nodata=0,
-            ) as vrt:
-                arr = vrt.read(1).astype(np.float32)
-                valid_mask = vrt.read_masks(1) > 0
-                arr[~valid_mask] = 0.0
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                href = planetary_computer.sign(asset.href)
+                with rasterio.Env(**GDAL_HTTP_OPTIONS), rasterio.open(href) as src:
+                    with WarpedVRT(
+                        src,
+                        crs=profile_template["crs"],
+                        transform=transform,
+                        width=width,
+                        height=height,
+                        resampling=resampling,
+                        nodata=0,
+                    ) as vrt:
+                        arr = vrt.read(1).astype(np.float32)
+                        valid_mask = vrt.read_masks(1) > 0
+                        arr[~valid_mask] = 0.0
+                break
+            except Exception as exc:
+                if attempt == max_retries:
+                    raise
+                wait = 10 * attempt
+                LOGGER.warning(
+                    "Band %s (%s) read failed (attempt %s/%s): %s — retrying in %ss",
+                    band_number, label, attempt, max_retries, exc, wait,
+                )
+                time.sleep(wait)
         LOGGER.info("Finished band %s (%s) for item %s", band_number, label, item.id)
 
         return arr, label
