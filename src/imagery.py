@@ -578,7 +578,7 @@ def _download_item_stack(
 
         LOGGER.info("Reading band %s (%s) for item %s", band_number, label, item.id)
         resampling = Resampling.nearest  # Match GEE default (nearest neighbor)
-        _BAND_READ_TIMEOUT = 90  # seconds; Python-level guard against GDAL libcurl hangs
+        _BAND_READ_TIMEOUT = 180  # seconds; Python-level guard against GDAL libcurl hangs
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
@@ -615,7 +615,7 @@ def _download_item_stack(
             except Exception as exc:
                 if attempt == max_retries:
                     raise
-                wait = 10 * attempt
+                wait = 30 * attempt
                 LOGGER.warning(
                     "Band %s (%s) read failed (attempt %s/%s): %s — retrying in %ss",
                     band_number, label, attempt, max_retries, exc, wait,
