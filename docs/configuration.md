@@ -85,18 +85,6 @@ activefire: SP    # SP / NRT / none
 
 FIRMS の主出力は元の point/event data（Shapefile: 緯度経度・取得日時・confidence・FRP・scan/track 等）です。ピクセルラスタ（`activefire_tif/`）はデフォルトでは生成されません（下記参照）。
 
-### GEE 互換出力 CRS（Sentinel-2、AOI 依存）
-
-```yaml
-gee_compatible:
-  enabled: true
-  output_crs: EPSG:32652   # AOI に合わせた UTM ゾーン
-  aoi_as_bbox: true
-  snap_grid: true
-```
-
-Google Earth Engine エクスポートとグリッドを合わせるためのオプションです。`output_crs` は AOI の地域ごとに異なる UTM ゾーンを指定する必要があるため、他の詳細設定と異なりコード側の共通デフォルトを持たせていません。GEE 互換出力が不要な場合は `enabled: false` にするか、このブロックごと `config.yaml` から削除してください。
-
 ---
 
 ## Internal defaults / advanced behavior
@@ -110,6 +98,22 @@ Google Earth Engine エクスポートとグリッドを合わせるためのオ
 | `file_exists` | `skip` | 出力ファイルが既にある場合の動作。`skip` = スキップ、`overwrite` = 上書き |
 | `img_only` | `false` | `img/` のみ（再）生成し、雲・雪マスクはスキップ（CLI `--img-only` でも指定可） |
 | `metadata.enabled` | `true` | 撮影メタデータを `img/` 配下に GeoJSON で保存するか |
+
+### GEE 互換出力グリッド（Sentinel-2）
+
+Google Earth Engine エクスポートとグリッドを合わせるモード（AOI のバウンディングボックスを範囲とし、ピクセルアラインメントにスナップする）は Sentinel-2 で常に有効です。出力 CRS（UTM ゾーン）は **AOI GeoJSON のバウンディングボックス中心から自動判定**されます（`geopandas.estimate_utm_crs()` 等と同じ、bbox 中心の経度からゾーン番号・緯度から南北半球を決める標準的な方式）。`geojson:` を別地域に変更しても、古い UTM ゾーンが残ってしまう心配はありません。
+
+AOI が UTM ゾーン境界（経度6度ごと）を跨ぐ場合でも、bbox 中心を含むゾーンに一意に決定されます。境界を跨ぐ AOI では中心から離れた側の歪みが多少大きくなりますが、これは UTM 投影自体の性質であり、跨ぐ AOI に対して「唯一正しいゾーン」は存在しません。
+
+自動判定を上書きしたい場合や、GEE 互換モード自体を無効化したい場合のみ、従来通り `gee_compatible:` ブロックを追加してください：
+
+```yaml
+gee_compatible:
+  enabled: true        # デフォルト true。false で無効化
+  output_crs: EPSG:32654   # 指定すると自動判定を上書き
+  aoi_as_bbox: true     # デフォルト true
+  snap_grid: true       # デフォルト true
+```
 
 ### omnicloudmask の推論設定
 
@@ -281,10 +285,4 @@ cloudmask: [1, 3]
 snowmask: false
 
 activefire: none
-
-gee_compatible:
-  enabled: false
-  output_crs: EPSG:32654
-  aoi_as_bbox: true
-  snap_grid: true
 ```

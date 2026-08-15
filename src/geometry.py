@@ -34,6 +34,39 @@ def _bbox_from_geometry(geometry: Dict[str, Any]) -> Tuple[float, float, float, 
     return float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])
 
 
+def _utm_epsg_from_lonlat(lon: float, lat: float) -> str:
+    """UTM zone/hemisphere for a single lon/lat point, WGS84 convention.
+
+    Standard formula: zone = floor((lon + 180) / 6) + 1, hemisphere from the
+    sign of latitude (326xx = north, 327xx = south). This is the same rule
+    used by common "auto UTM" tooling (e.g. geopandas'
+    GeoDataFrame.estimate_utm_crs()).
+    """
+    normalized_lon = ((lon + 180.0) % 360.0) - 180.0
+    zone = int(math.floor((normalized_lon + 180.0) / 6.0)) + 1
+    zone = max(1, min(60, zone))
+    hemisphere_code = 32600 if lat >= 0 else 32700
+    return f"EPSG:{hemisphere_code + zone}"
+
+
+def _estimate_utm_crs_from_geometry(geometry: Dict[str, Any]) -> str:
+    """Pick a UTM CRS for an AOI from its bounding-box center.
+
+    Deterministic and AOI-dependent: re-running this on a different AOI
+    (e.g. after switching `geojson:` to a different region) always yields
+    the correct zone for that AOI, with no risk of a stale hardcoded value.
+
+    If the AOI straddles a UTM zone boundary, this still returns exactly one
+    zone (the one containing the bbox center) -- there is no "correct" UTM
+    zone for a boundary-straddling AOI; distortion increases for pixels far
+    from the center, which is inherent to the UTM projection itself.
+    """
+    west, south, east, north = _bbox_from_geometry(geometry)
+    center_lon = (west + east) / 2.0
+    center_lat = (south + north) / 2.0
+    return _utm_epsg_from_lonlat(center_lon, center_lat)
+
+
 def _expand_bbox_by_meters(
     bbox: Tuple[float, float, float, float],
     buffer_m: float,
