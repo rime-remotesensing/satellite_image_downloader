@@ -124,6 +124,86 @@ python run.py --config config/config.yaml --img-only
 
 ---
 
+## MODIS/VIIRS Surface Reflectance 設定（NASA Earthdata）
+
+`satellite` に `modis` / `viirs` を含めると、NASA Earthdata から daily Surface Reflectance を
+ネイティブの Sinusoidal グリッドのまま（再投影・リサンプリングなし）ローカルへ直接ダウンロードします。
+Google Earth Engine は使用しません。FIRMS の熱異常取得（`firms.activefire_satellite`）とは完全に独立した処理系です。
+
+```yaml
+satellite:
+  - modis
+  - viirs
+
+surface_reflectance:
+  products:
+    modis:
+      terra: MOD09GA   # Terra
+      aqua: MYD09GA    # Aqua（Terraとは合成せず、常に別ファイル）
+      version: "061"
+    viirs:
+      snpp: VNP09GA    # Suomi-NPP
+      version: "002"
+  clip_to_aoi: true          # true: AOIで切り抜き（native grid alignmentは変えない）
+  earthdata_env_path: ./key.env  # 認証情報を読み込むファイル（firms.key_env_pathと同じ形式）
+  keep_native_files: false   # true: ダウンロードしたHDF/HDF5を処理後も残す（デバッグ用）
+```
+
+| キー | 型 | デフォルト | 説明 |
+|------|----|-----------|------|
+| `surface_reflectance.products.modis.terra` | string | `MOD09GA` | Terra の短縮名 |
+| `surface_reflectance.products.modis.aqua` | string | `MYD09GA` | Aqua の短縮名 |
+| `surface_reflectance.products.modis.version` | string | `061` | MODIS プロダクトバージョン |
+| `surface_reflectance.products.viirs.snpp` | string | `VNP09GA` | Suomi-NPP の短縮名 |
+| `surface_reflectance.products.viirs.version` | string | `002` | VIIRS プロダクトバージョン |
+| `surface_reflectance.clip_to_aoi` | bool | `true` | AOI で切り抜くか（native pixel gridは維持） |
+| `surface_reflectance.earthdata_env_path` | string | `./key.env` | Earthdata 認証情報を読み込むファイル |
+| `surface_reflectance.keep_native_files` | bool | `false` | ダウンロードした HDF/HDF5 を残すか |
+
+### Earthdata 認証
+
+`config.yaml` やソースコードに認証情報を直接書かないでください。以下のいずれかで設定します（優先順）：
+
+1. 環境変数 `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD`（Docker では `-e` または `docker-compose.yml` の `environment` で渡せます）
+2. `surface_reflectance.earthdata_env_path`（デフォルト `./key.env`）に FIRMS キーと同様の形式で追記：
+   ```
+   EARTHDATA_USERNAME=your_username
+   EARTHDATA_PASSWORD=your_password
+   ```
+   （`key.env` は `.gitignore` 済みでコミットされません）
+3. netrc ファイル（Linux/Mac: `~/.netrc`、Windows: `%USERPROFILE%\_netrc`）：
+   ```
+   machine urs.earthdata.nasa.gov
+       login your_username
+       password your_password
+   ```
+
+Earthdata アカウントは <https://urs.earthdata.nasa.gov/> で無料登録できます。
+
+### 座標系・出力について
+
+- ダウンロード・SR 生成段階では再投影・リサンプリングを一切行わず、NASA native Sinusoidal グリッド（CRS・affine transform・pixel size）をそのまま保持します。
+- AOI が複数タイルに跨る場合は、同日・同プロダクト・同解像度のタイルを native grid 上で mosaic してから AOI で切り抜きます。
+- Surface Reflectance（`sur_refl_b01`–`b07`, VIIRS `I1`–`I3`/`M1`–`M11`）は HDF 内の scale factor / offset / fill value を読み取り、float32 の物理反射率として保存します。
+- QA（MODIS `QC_500m` / `state_1km`、VIIRS `QF1`–`QF7` / `land_water_mask`）は整数値のまま保持し、スケーリングは行いません。雲マスク処理（omnicloudmask 含む）は適用されません。
+- MODIS Terra/Aqua、VIIRS I-band(500m)/M-band(1km) は互いに合成せず、常に別ファイルとして出力します。
+
+出力例：
+
+```
+output/modis/surface_reflectance/terra/500m/MOD09GA_terra_20230301_500m.tif
+output/modis/surface_reflectance/terra/qa/MOD09GA_terra_20230301_QC_500m.tif
+output/modis/surface_reflectance/terra/qa/MOD09GA_terra_20230301_state_1km.tif
+output/modis/surface_reflectance/aqua/500m/MYD09GA_aqua_20230301_500m.tif
+output/viirs/surface_reflectance/snpp/500m/VNP09GA_snpp_20230301_500m.tif
+output/viirs/surface_reflectance/snpp/1km/VNP09GA_snpp_20230301_1km.tif
+output/viirs/surface_reflectance/snpp/qa/VNP09GA_snpp_20230301_QA_1km.tif
+```
+
+各 GeoTIFF には元の SDS 名・scale・offset・fill value・product/platform/date/tile 情報がバンドタグ（および同名の `.json` サイドカー）として保存されます。
+
+---
+
 ## FIRMS 熱異常データ設定
 
 熱異常データをダウンロードするには `firms.activefire_satellite` と `firms.product_map` の両方を設定してください。どちらかが未設定の場合はダウンロードされません。

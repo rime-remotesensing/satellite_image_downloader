@@ -1,14 +1,15 @@
 # satellite-image-downloader
 
-[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/) から Sentinel-2 / Landsat 8・9 衛星画像を、[NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) から熱異常（アクティブファイア）データを自動ダウンロード・前処理する設定ファイル駆動のパイプラインです。
+[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/) から Sentinel-2 / Landsat 8・9 衛星画像を、[NASA Earthdata](https://urs.earthdata.nasa.gov/) から MODIS/VIIRS の daily Surface Reflectance を、[NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) から熱異常（アクティブファイア）データを自動ダウンロード・前処理する設定ファイル駆動のパイプラインです。
 
 ## 機能
 
-- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2
+- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2 / MODIS Terra・Aqua (MOD09GA/MYD09GA) / VIIRS Suomi-NPP (VNP09GA)
 - **AOI クリッピング**: GeoJSON ポリゴンで任意の領域に切り抜き
-- **自動雲マスク**: [omnicloudmask](https://github.com/DPIRD-DMA/OmniCloudMask) による雲・影マスク
-- **雪マスク**: NDSI ベースの雪マスク（オプション）
+- **自動雲マスク**: [omnicloudmask](https://github.com/DPIRD-DMA/OmniCloudMask) による雲・影マスク（Sentinel-2/Landsat）
+- **雪マスク**: NDSI ベースの雪マスク（オプション、Sentinel-2/Landsat）
 - **同日コンポジット**: 同日の複数シーンを最小値合成で1枚に統合
+- **MODIS/VIIRS Surface Reflectance**: NASA Earthdata から native Sinusoidal グリッドのまま直接ダウンロード（再投影・リサンプリング・雲マスクなし、NASA公式QAを保持）
 - **熱異常（アクティブファイア）データ**: FIRMS MODIS/VIIRS の熱異常域を Shapefile + ラスタで取得
 - **GPU 対応**: CUDA GPU があれば omnicloudmask の推論を高速化
 - **Docker 対応**: 依存関係を含む再現可能な実行環境
@@ -53,7 +54,7 @@ nvidia-smi
 
 ```dockerfile
 # ① ベースイメージ: cuda バージョンをホストに合わせる
-FROM nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 #                 ^^^^  ここを変える
 
 # ② PyTorch ビルド: cu128 の部分をホストに合わせる
@@ -66,7 +67,7 @@ ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 | 11.8 | `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` | `cu118` |
 | 12.1 | `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04` | `cu121` |
 | 12.4 | `nvidia/cuda:12.4.1-cudnn9-runtime-ubuntu22.04` | `cu124` |
-| 12.8 (デフォルト) | `nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04` | `cu128` |
+| 12.8 (デフォルト) | `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04` | `cu128` |
 
 #### Docker イメージをビルドする
 
@@ -153,7 +154,18 @@ FIRMS_API_KEY=your_api_key_here
 
 > `key.env` は `.gitignore` で除外されているためコミットされません。
 
-### 4. 実行する
+### 4. Earthdata 認証情報を設定する（MODIS/VIIRS Surface Reflectance が必要な場合）
+
+<https://urs.earthdata.nasa.gov/> で無料登録し、`key.env` に追記（または環境変数 `EARTHDATA_USERNAME`/`EARTHDATA_PASSWORD`、もしくは netrc ファイルでも可）：
+
+```
+EARTHDATA_USERNAME=your_username
+EARTHDATA_PASSWORD=your_password
+```
+
+詳細は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectance-設定nasa-earthdata) を参照してください。
+
+### 5. 実行する
 
 ```bash
 # ローカル実行
@@ -287,15 +299,28 @@ output/
 │   ├── snowmasked/
 │   └── cloudmask/
 ├── modis/
+│   ├── surface_reflectance/
+│   │   ├── terra/             # MOD09GA (Terra)
+│   │   │   ├── 500m/          # sur_refl_b01-b07 (float32, native Sinusoidal)
+│   │   │   └── qa/            # QC_500m, state_1km (raw, unscaled)
+│   │   └── aqua/              # MYD09GA (Aqua, Terraとは別ファイル)
+│   │       ├── 500m/
+│   │       └── qa/
 │   ├── activefire/       # MODIS 熱異常 Shapefile
 │   └── activefire_tif/   # MODIS 熱異常ピクセルラスタ
 └── viirs/
+    ├── surface_reflectance/
+    │   └── snpp/               # VNP09GA (Suomi-NPP)
+    │       ├── 500m/           # I1-I3 (native ~463m)
+    │       ├── 1km/            # M1-M5,M7,M8,M10,M11 (native ~927m, 500mへ集約しない)
+    │       └── qa/             # QF1-QF7, land_water_mask (raw, unscaled)
     ├── activefire/       # VIIRS 熱異常 Shapefile
     └── activefire_tif/   # VIIRS 熱異常ピクセルラスタ
 ```
 
 > `img/` はシーン単位の生データを保存します。それ以外（`masked` / `snowmasked` / `cloudmask`）は同日コンポジット後の結果です。
 > `metadata.enabled: true` にすると、撮影メタデータ GeoJSON が `img/` 配下に保存されます。
+> MODIS/VIIRS の `surface_reflectance/` は NASA Earthdata から直接取得したもので、Sentinel-2/Landsat とは独立した処理系です。設定は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectance-設定nasa-earthdata) を参照してください。
 
 ---
 

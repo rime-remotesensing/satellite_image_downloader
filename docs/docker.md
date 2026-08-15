@@ -28,7 +28,7 @@ nvidia-smi
 
 ```dockerfile
 # ① ベースイメージの CUDA バージョンを変える
-FROM nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 #                 ^^^^  ← ここを変える
 
 # ② PyTorch ビルドを合わせる
@@ -41,7 +41,7 @@ ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 | 11.8 | `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` | `cu118` |
 | 12.1 | `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04` | `cu121` |
 | 12.4 | `nvidia/cuda:12.4.1-cudnn9-runtime-ubuntu22.04` | `cu124` |
-| 12.8（デフォルト） | `nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04` | `cu128` |
+| 12.8（デフォルト） | `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04` | `cu128` |
 
 参考リンク:
 - PyTorch ビルド一覧: <https://download.pytorch.org/whl/torch/>

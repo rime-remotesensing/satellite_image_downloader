@@ -17,6 +17,10 @@ from .config import (
 from .constants import SENTINEL_COLLECTION
 from .geometry import _bbox_from_geometry, _load_aoi_geometry
 from .imagery import _infer_item_output_crs, _process_satellite_imagery, _search_stac_items
+from .surface_reflectance import (
+    _process_modis_surface_reflectance,
+    _process_viirs_surface_reflectance,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -115,6 +119,30 @@ def run_pipeline(
                 end_date=end_date,
                 satellite_key="landsat89",
                 skip_satellite_subdir=skip_satellite_subdir,
+            )
+
+        if "modis" in satellites:
+            LOGGER.info("Processing MODIS surface reflectance... (%s-%s)", start_date, end_date)
+            summary["modis_surface_reflectance"] = _process_modis_surface_reflectance(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=geometry_wgs84,
+                bbox=bbox,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        if "viirs" in satellites:
+            LOGGER.info("Processing VIIRS surface reflectance... (%s-%s)", start_date, end_date)
+            summary["viirs_surface_reflectance"] = _process_viirs_surface_reflectance(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=geometry_wgs84,
+                bbox=bbox,
+                start_date=start_date,
+                end_date=end_date,
             )
 
         if not img_only and include_activefire and activefire_targets:
