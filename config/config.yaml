@@ -8,18 +8,17 @@
 # Area
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
-geojson: ./config/no5.geojson
+geojson: ./config/tochigi.geojson
 
 # Period（複数期間を順番に実行したい場合は配列で指定。startday/enddayは同じ要素数）
-startday: [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426, 20210506]
-endday:   [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426, 20210506]
+startday: [20250225, 20250322]
+endday:   [20250225, 20250322]
 
 # Satellite imagery
 # sentinel2 / landsat89: Microsoft Planetary Computer から取得
 # modis / viirs: NASA Earthdata から daily Surface Reflectance を取得
 satellite:
-  - modis
-  - viirs
+  - sentinel2
 
 # Band selection（Sentinel-2 / Landsat 8-9のみ）
 # band: all で全バンド、band: at + num: [..] で指定バンドのみ
