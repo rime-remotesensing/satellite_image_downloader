@@ -31,13 +31,18 @@ from .config import _as_bool
 from .geometry import _bbox_from_geometry
 from .constants import (
     CLOUDMASK_REQUIRED_BANDS,
+    DEFAULT_FILE_EXISTS,
+    DEFAULT_MAX_CLOUD_COVER,
     DN_CONVERSION_PRESETS,
     GDAL_HTTP_OPTIONS,
     LANDSAT_BAND_MAP,
     LANDSAT_COLLECTION,
+    OMNICLOUDMASK_DEFAULTS,
     PC_STAC_URL,
     SENTINEL_BAND_MAP,
     SENTINEL_COLLECTION,
+    SNOWMASK_DEFAULT_NDSI_THRESHOLD,
+    SNOWMASK_DEFAULT_RED_THRESHOLD,
     SNOWMASK_REQUIRED_BANDS,
     TARGET_RESOLUTION,
 )
@@ -1001,16 +1006,24 @@ def _process_satellite_imagery(
     satellite_key: str,
     skip_satellite_subdir: bool = False,
 ) -> Dict[str, Any]:
-    max_cloud = config.get("max_cloud_cover", 80)
-    file_exists_mode = str(config.get("file_exists", "overwrite")).strip().lower()
+    max_cloud = config.get("max_cloud_cover", DEFAULT_MAX_CLOUD_COVER)
+    file_exists_mode = str(config.get("file_exists", DEFAULT_FILE_EXISTS)).strip().lower()
     if file_exists_mode not in {"overwrite", "skip"}:
         raise ValueError("config.file_exists must be 'overwrite' or 'skip'")
     cloudmask_classes = [int(v) for v in config.get("cloudmask", [1, 2, 3])]
-    omnicloudmask_cfg = config.get("omnicloudmask", {})
-    snowmask_cfg = config.get("snowmask", {})
-    snowmask_enabled = bool(snowmask_cfg.get("enabled", False))
-    ndsi_threshold = float(snowmask_cfg.get("ndsi_threshold", 0.4))
-    red_threshold = float(snowmask_cfg.get("red_threshold", 0.2))
+    omnicloudmask_cfg = {**OMNICLOUDMASK_DEFAULTS, **(config.get("omnicloudmask") or {})}
+
+    # snowmask: true/false (simplified) or the legacy
+    # {enabled, ndsi_threshold, red_threshold} dict form.
+    snowmask_raw = config.get("snowmask", False)
+    if isinstance(snowmask_raw, dict):
+        snowmask_enabled = bool(snowmask_raw.get("enabled", False))
+        ndsi_threshold = float(snowmask_raw.get("ndsi_threshold", SNOWMASK_DEFAULT_NDSI_THRESHOLD))
+        red_threshold = float(snowmask_raw.get("red_threshold", SNOWMASK_DEFAULT_RED_THRESHOLD))
+    else:
+        snowmask_enabled = _as_bool(snowmask_raw, default=False)
+        ndsi_threshold = SNOWMASK_DEFAULT_NDSI_THRESHOLD
+        red_threshold = SNOWMASK_DEFAULT_RED_THRESHOLD
     metadata_cfg = config.get("metadata", {})
     metadata_enabled = bool(metadata_cfg.get("enabled", True))
     img_only = _as_bool(config.get("img_only"), default=False)

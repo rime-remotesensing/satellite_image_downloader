@@ -5,16 +5,17 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from .activefire import _process_activefire
+from .activefire import _process_activefire, _resolve_firms_product_map
 from .config import (
     _as_bool,
     _load_config,
+    _normalize_activefire_level,
     _normalize_activefire_satellites,
     _normalize_date_list,
     _normalize_satellites,
     _resolve_runtime_path,
 )
-from .constants import SENTINEL_COLLECTION
+from .constants import DEFAULT_MAX_CLOUD_COVER, DEFAULT_OUTPUT_DIR, SENTINEL_COLLECTION
 from .geometry import _bbox_from_geometry, _load_aoi_geometry
 from .imagery import _infer_item_output_crs, _process_satellite_imagery, _search_stac_items
 from .surface_reflectance import (
@@ -44,7 +45,7 @@ def run_pipeline(
     )
 
     output_root = _resolve_runtime_path(
-        str(config.get("output", "output")),
+        str(config.get("output", DEFAULT_OUTPUT_DIR)),
         config_dir,
         must_exist=False,
     )
@@ -61,8 +62,21 @@ def run_pipeline(
     firms_cfg = config.get("firms", {})
     img_only = _as_bool(config.get("img_only"), default=False)
 
+    # Simplified `activefire: SP|NRT|none` (preferred) takes priority over the
+    # legacy `firms.activefire_satellite` + `firms.product_map` config, which
+    # remains supported for backward compatibility when `activefire` is unset.
     activefire_targets: List[str]
-    if "activefire_satellite" in firms_cfg:
+    firms_product_map_override: Optional[Dict[str, List[str]]] = None
+
+    activefire_level_raw = config.get("activefire")
+    if activefire_level_raw is not None:
+        activefire_level = _normalize_activefire_level(activefire_level_raw)
+        if activefire_level == "none":
+            activefire_targets = []
+        else:
+            activefire_targets = ["modis", "viirs"]
+            firms_product_map_override = _resolve_firms_product_map(activefire_level)
+    elif "activefire_satellite" in firms_cfg:
         activefire_targets = _normalize_activefire_satellites(
             firms_cfg.get("activefire_satellite")
         )
@@ -159,7 +173,7 @@ def run_pipeline(
                         geometry=geometry_wgs84,
                         start_date=start_date,
                         end_date=end_date,
-                        max_cloud_cover=config.get("max_cloud_cover", 80),
+                        max_cloud_cover=config.get("max_cloud_cover", DEFAULT_MAX_CLOUD_COVER),
                     )
                     if s2_items:
                         activefire_crs_ref = _infer_item_output_crs(s2_items[0])
@@ -178,6 +192,7 @@ def run_pipeline(
                 start_date=start_date,
                 end_date=end_date,
                 satellites=activefire_targets,
+                product_map_override=firms_product_map_override,
             )
 
         return summary
@@ -217,7 +232,7 @@ def run_pipeline(
                     geometry=geometry_wgs84,
                     start_date=combined_start,
                     end_date=combined_end,
-                    max_cloud_cover=config.get("max_cloud_cover", 80),
+                    max_cloud_cover=config.get("max_cloud_cover", DEFAULT_MAX_CLOUD_COVER),
                 )
                 if s2_items:
                     activefire_crs_ref = _infer_item_output_crs(s2_items[0])
@@ -240,6 +255,7 @@ def run_pipeline(
             start_date=combined_start,
             end_date=combined_end,
             satellites=activefire_targets,
+            product_map_override=firms_product_map_override,
         )
 
     result: Dict[str, Any] = {

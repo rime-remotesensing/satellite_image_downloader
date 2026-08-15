@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
@@ -172,3 +172,59 @@ MODIS_SDS_NAME_MAP: Dict[str, str] = {
     "QC_500m": "QC_500m_1",
     "state_1km": "state_1km_1",
 }
+
+# ---------------------------------------------------------------------------
+# FIRMS activefire level -> source mapping
+# ---------------------------------------------------------------------------
+# Confirmed against the official NASA FIRMS API docs
+# (https://firms.modaps.eosdis.nasa.gov/api/area/,
+# https://firms.modaps.eosdis.nasa.gov/api/data_availability/). VIIRS
+# NOAA-21 Standard Processing (SP) does not exist as a source -- NOAA-21 is
+# NRT-only -- so its "sp" entry is None. Callers must skip + warn on None,
+# never silently substitute the NRT source.
+FIRMS_SOURCE_BY_LEVEL: Dict[str, Dict[str, Dict[str, Optional[str]]]] = {
+    "sp": {
+        "modis": {"modis": "MODIS_SP"},
+        "viirs": {"snpp": "VIIRS_SNPP_SP", "noaa20": "VIIRS_NOAA20_SP", "noaa21": None},
+    },
+    "nrt": {
+        "modis": {"modis": "MODIS_NRT"},
+        "viirs": {
+            "snpp": "VIIRS_SNPP_NRT",
+            "noaa20": "VIIRS_NOAA20_NRT",
+            "noaa21": "VIIRS_NOAA21_NRT",
+        },
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Internal defaults for settings no longer exposed in config.yaml
+# ---------------------------------------------------------------------------
+# These preserve the exact effective behavior that the project's config.yaml
+# used to pin explicitly, now that config.yaml only exposes user-facing keys
+# (see docs/configuration.md "Internal defaults / advanced behavior").
+DEFAULT_OUTPUT_DIR = "output"
+DEFAULT_FILE_EXISTS = "skip"
+DEFAULT_MAX_CLOUD_COVER = 80
+
+OMNICLOUDMASK_DEFAULTS: Dict[str, Any] = {
+    "batch_size": 1,
+    "patch_size": 1000,
+    "patch_overlap": 300,
+    "device": "cuda",
+}
+
+SNOWMASK_DEFAULT_NDSI_THRESHOLD = 0.4
+SNOWMASK_DEFAULT_RED_THRESHOLD = 0.2
+
+FIRMS_DEFAULT_KEY_ENV_PATH = "key.env"
+FIRMS_DEFAULT_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+FIRMS_DEFAULT_BBOX_BUFFER_M = 5000.0
+FIRMS_DEFAULT_CLIP_TO_AOI = False
+FIRMS_DEFAULT_DAYS = 5
+FIRMS_DEFAULT_PERIOD_SUMMARY = True
+# Active fire pixel-raster (activefire_tif/) output is opt-in only now; the
+# point/event data (Shapefile) remains the primary FIRMS output.
+FIRMS_DEFAULT_PIXEL_TIF = False
+FIRMS_DEFAULT_PIXEL_RESOLUTION = 10.0
+FIRMS_DEFAULT_PIXEL_EXPAND_TO_DETECTIONS = True
