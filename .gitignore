@@ -101,6 +101,7 @@ dmypy.json
 # データファイル
 input/
 output/
+output_smoketest/
 data/
 
 # ログファイル

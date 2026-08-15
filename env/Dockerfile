@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     gdal-bin \
     libgdal-dev \
+    build-essential \
+    libhdf4-alt-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --upgrade pip setuptools wheel

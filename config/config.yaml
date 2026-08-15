@@ -7,7 +7,9 @@ endday:   [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426,
 # 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
 
 # Select one or multiple: sentinel2, landsat89, modis, viirs
-# FIRMS active fire targets are recommended to be set in firms.activefire_satellite
+# modis / viirs here control daily Surface Reflectance downloads from NASA
+# Earthdata (see surface_reflectance below). FIRMS active fire targets are
+# controlled independently by firms.activefire_satellite.
 satellite:
   - modis
   - viirs
@@ -62,6 +64,28 @@ snowmask:
 # 例: 20240201-20240415.geojson
 metadata:
   enabled: true
+
+# MODIS/VIIRS daily Surface Reflectance settings (NASA Earthdata, native
+# Sinusoidal grid, no reprojection/resampling/cloud-masking here).
+# Only used when "modis" / "viirs" are listed in `satellite` above.
+# Auth: EARTHDATA_USERNAME / EARTHDATA_PASSWORD env vars, or the same
+# key.env file used for FIRMS (EARTHDATA_USERNAME=...\nEARTHDATA_PASSWORD=...),
+# or a netrc file (~/.netrc, Windows: %USERPROFILE%\_netrc).
+surface_reflectance:
+  products:
+    modis:
+      terra: MOD09GA
+      aqua: MYD09GA
+      version: "061"
+    viirs:
+      snpp: VNP09GA
+      version: "002"
+  # true の場合、AOIのCRSへ変換した上でnative gridを保ったままcrop/mask
+  clip_to_aoi: true
+  # 認証情報を読み込むファイル（firms.key_env_pathと同じ形式）
+  earthdata_env_path: ./key.env
+  # true の場合、処理後もダウンロードしたHDF/HDF5を消さずに残す（デバッグ用）
+  keep_native_files: false
 
 # FIRMS API settings
 firms:

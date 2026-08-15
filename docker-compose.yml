@@ -11,6 +11,12 @@ services:
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
       TORCH_HOME: /root/.cache/torch
+      # NASA Earthdata credentials for MODIS/VIIRS Surface Reflectance downloads.
+      # Set these on the host (or in a local .env picked up by docker compose),
+      # never commit them. Alternatively use surface_reflectance.earthdata_env_path
+      # (default ./key.env) or a mounted netrc file.
+      EARTHDATA_USERNAME: ${EARTHDATA_USERNAME:-}
+      EARTHDATA_PASSWORD: ${EARTHDATA_PASSWORD:-}
     volumes:
       - ./:/workspace
       - ${SATDL_HOST_DATA_PATH:-./data}:/host_data
