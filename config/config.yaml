@@ -38,11 +38,3 @@ snowmask: true
 # NRT  = Near Real-Time（速報値）
 # none = Active Fire を取得しない
 activefire: SP
-
-# GEE互換出力CRS（Sentinel-2）。AOIの地域に合わせたUTMゾーンを指定してください。
-# 不要な場合は enabled: false にするか、このブロック自体を削除できます。
-gee_compatible:
-  enabled: true
-  output_crs: EPSG:32652
-  aoi_as_bbox: true
-  snap_grid: true

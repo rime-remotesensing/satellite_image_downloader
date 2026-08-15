@@ -28,7 +28,7 @@ from rasterio.warp import reproject, transform_geom
 from omnicloudmask import predict_from_array
 
 from .config import _as_bool
-from .geometry import _bbox_from_geometry
+from .geometry import _bbox_from_geometry, _estimate_utm_crs_from_geometry
 from .constants import (
     CLOUDMASK_REQUIRED_BANDS,
     DEFAULT_FILE_EXISTS,
@@ -1030,15 +1030,20 @@ def _process_satellite_imagery(
     if img_only:
         file_exists_mode = "overwrite"
 
-    gee_cfg = config.get("gee_compatible", {})
-    gee_enabled = _as_bool(gee_cfg.get("enabled"), default=False)
+    # GEE-compatible Sentinel-2 export grid (fixed UTM CRS, AOI-as-bbox extent,
+    # pixel-aligned snapping) is on by default. output_crs is auto-detected
+    # from the AOI's bounding-box center UTM zone unless explicitly overridden
+    # via the (now optional, advanced) gee_compatible.output_crs config key --
+    # this avoids a stale hardcoded zone when geojson: points at a new region.
+    gee_cfg = config.get("gee_compatible", {}) or {}
+    gee_enabled = _as_bool(gee_cfg.get("enabled"), default=True)
 
     output_crs_override: Optional[str] = None
     use_bbox_extent = False
     snap_to_resolution_grid = False
     if satellite_key == "sentinel2" and gee_enabled:
         output_crs_raw = str(gee_cfg.get("output_crs", "")).strip()
-        output_crs_override = output_crs_raw or None
+        output_crs_override = output_crs_raw or _estimate_utm_crs_from_geometry(geometry_wgs84)
         use_bbox_extent = _as_bool(gee_cfg.get("aoi_as_bbox"), default=True)
         snap_to_resolution_grid = _as_bool(gee_cfg.get("snap_grid"), default=True)
 
