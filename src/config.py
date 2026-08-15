@@ -135,6 +135,24 @@ def _normalize_activefire_satellites(value: Any) -> List[str]:
     return deduped
 
 
+def _normalize_activefire_level(value: Any) -> str:
+    """Validate the simplified top-level `activefire` setting.
+
+    Returns 'sp', 'nrt', or 'none'. Raises ValueError on anything else --
+    an unrecognized value must fail loudly, not silently fall back.
+    """
+    text = str(value).strip().lower()
+    if text in {"none", "off", "disabled", ""}:
+        return "none"
+    if text == "sp":
+        return "sp"
+    if text == "nrt":
+        return "nrt"
+    raise ValueError(
+        f"config.activefire must be one of 'SP', 'NRT', 'none' (got: {value!r})"
+    )
+
+
 def _normalize_firms_products(
     value: Any,
     *,

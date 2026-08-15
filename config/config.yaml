@@ -1,125 +1,48 @@
-# Core inputs
+# ==========================================
+# Satellite Image Downloader
+# ==========================================
+# ここには実行ごとに変更する可能性が高い項目だけを置いています。
+# 内部default・詳細設定は docs/configuration.md の
+# "Internal defaults / advanced behavior" を参照してください。
+
+# Area
 # Docker実行時に作業ディレクトリ外を使う場合は、/host_data/... を指定
 # (host側は SATDL_HOST_DATA_PATH で任意パスをマウント)
 geojson: ./config/no5.geojson
+
+# Period（複数期間を順番に実行したい場合は配列で指定。startday/enddayは同じ要素数）
 startday: [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426, 20210506]
 endday:   [20210225, 20210317, 20210327, 20210401, 20210411, 20210421, 20210426, 20210506]
-# 複数期間を順番に実行したい場合は配列で指定（startday/enddayは同じ要素数）
 
-# Select one or multiple: sentinel2, landsat89, modis, viirs
-# modis / viirs here control daily Surface Reflectance downloads from NASA
-# Earthdata (see surface_reflectance below). FIRMS active fire targets are
-# controlled independently by firms.activefire_satellite.
+# Satellite imagery
+# sentinel2 / landsat89: Microsoft Planetary Computer から取得
+# modis / viirs: NASA Earthdata から daily Surface Reflectance を取得
 satellite:
   - modis
   - viirs
 
-# Output root directory
-# 出力は各衛星ごとに以下を作成:
-# output/<satellite>/img         (生データ, シーン単位)
-# output/<satellite>/masked      (同日コンポジット)
-# output/<satellite>/snowmasked  (同日コンポジット)
-# output/<satellite>/cloudmask   (同日コンポジット)
-output: ./output
-
-# Band selection
-# band: all
-# band: at
-# num: [1, 2, 3]
+# Band selection（Sentinel-2 / Landsat 8-9のみ）
+# band: all で全バンド、band: at + num: [..] で指定バンドのみ
 band: all
 num: []
 
-# Cloud classes to mask: 1=thick cloud, 2=thin cloud, 3=shadow
+# Cloud mask classes to apply（Sentinel-2 / Landsat 8-9のみ）
+# 1=厚雲, 2=薄雲, 3=影
 cloudmask: [1, 3]
 
-# Optional STAC filter
-max_cloud_cover: 80
-file_exists: skip # overwrite or skip
-img_only: false # true: regenerate only img/ and metadata, skip cloudmask/masked/snowmasked
+# Snow mask（Sentinel-2 / Landsat 8-9のみ）
+snowmask: true
 
-# GEE compatibility options (Sentinel-2)
-# - output_crs: Match Get_Sentinel2.py export CRS
-# - aoi_as_bbox: Use AOI envelope like ee.Geometry.Rectangle export region
-# - snap_grid: Snap output grid to pixel-size aligned coordinates
+# FIRMS Active Fire
+# SP   = Standard Processing（確定値。過去データ向け）
+# NRT  = Near Real-Time（速報値）
+# none = Active Fire を取得しない
+activefire: SP
+
+# GEE互換出力CRS（Sentinel-2）。AOIの地域に合わせたUTMゾーンを指定してください。
+# 不要な場合は enabled: false にするか、このブロック自体を削除できます。
 gee_compatible:
   enabled: true
   output_crs: EPSG:32652
   aoi_as_bbox: true
   snap_grid: true
-
-# Cloud mask inference options
-omnicloudmask:
-  batch_size: 1
-  patch_size: 1000
-  patch_overlap: 300
-  device: cuda
-
-# Snow mask options
-snowmask:
-  enabled: true
-  ndsi_threshold: 0.4
-  red_threshold: 0.2
-
-# Metadata GeoJSON options
-# 例: 20240201-20240415.geojson
-metadata:
-  enabled: true
-
-# MODIS/VIIRS daily Surface Reflectance settings (NASA Earthdata, native
-# Sinusoidal grid, no reprojection/resampling/cloud-masking here).
-# Only used when "modis" / "viirs" are listed in `satellite` above.
-# Auth: EARTHDATA_USERNAME / EARTHDATA_PASSWORD env vars, or the same
-# key.env file used for FIRMS (EARTHDATA_USERNAME=...\nEARTHDATA_PASSWORD=...),
-# or a netrc file (~/.netrc, Windows: %USERPROFILE%\_netrc).
-surface_reflectance:
-  products:
-    modis:
-      terra: MOD09GA
-      aqua: MYD09GA
-      version: "061"
-    viirs:
-      snpp: VNP09GA
-      version: "002"
-  # true の場合、AOIのCRSへ変換した上でnative gridを保ったままcrop/mask
-  clip_to_aoi: true
-  # 認証情報を読み込むファイル（firms.key_env_pathと同じ形式）
-  earthdata_env_path: ./key.env
-  # true の場合、処理後もダウンロードしたHDF/HDF5を消さずに残す（デバッグ用）
-  keep_native_files: false
-
-# FIRMS API settings
-firms:
-  # active fire の取得対象（modis / viirs を任意に選択）
-  activefire_satellite:
-    - viirs
-    - modis
-  # APIキーは key.env から読み込む（推奨）
-  # 例: FIRMS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-  key_env_path: ./key.env
-  api_key: ""
-  base_url: "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
-  # true の場合、取得結果を最後にAOIポリゴンで切り抜く
-  clip_to_aoi: false
-  # FIRMS取得用のBBOXをAOIから上下左右に広げる距離[m]
-  bbox_buffer_m: 5000
-  # true の場合、active fire を Sentinel-2準拠グリッドのTIFでも出力
-  pixel_tif: true
-  # pixel_tif の解像度[m]（Sentinel-2に合わせる場合は10を推奨）
-  pixel_resolution: 10
-  # true の場合、検知フットプリントがグリッド外に出るときはTIF範囲を自動拡張
-  pixel_expand_to_detections: true
-  # FIRMS area API の day range は 1..5
-  days: 5
-  # true の場合、startday-endday 全期間の総まとめ Shapefile も1つ出力
-  period_summary: true
-  # 直近監視：NRT, 過去の解析：SP
-  product_map:
-    # MODIS_SP は Terra/Aqua を含む標準処理データ
-    modis:
-      - MODIS_SP
-    # VIIRS はセンサ別。SNPP + NOAA-20 を両方取得
-    # NOAA-21 は現状 NRT 系のみ（必要なら VIIRS_NOAA21_NRT を追加）
-    viirs:
-      - VIIRS_SNPP_SP
-      - VIIRS_NOAA20_SP
-      - VIIRS_NOAA21_SP

@@ -10,7 +10,7 @@
 - **雪マスク**: NDSI ベースの雪マスク（オプション、Sentinel-2/Landsat）
 - **同日コンポジット**: 同日の複数シーンを最小値合成で1枚に統合
 - **MODIS/VIIRS Surface Reflectance**: NASA Earthdata から native Sinusoidal グリッドのまま直接ダウンロード（再投影・リサンプリング・雲マスクなし、NASA公式QAを保持）
-- **熱異常（アクティブファイア）データ**: FIRMS MODIS/VIIRS の熱異常域を Shapefile + ラスタで取得
+- **熱異常（アクティブファイア）データ**: FIRMS MODIS/VIIRS の熱異常検知を point data（Shapefile）として取得（`activefire: SP`/`NRT`）
 - **GPU 対応**: CUDA GPU があれば omnicloudmask の推論を高速化
 - **Docker 対応**: 依存関係を含む再現可能な実行環境
 
@@ -137,12 +137,20 @@ pip install -r env/requirements.txt
 geojson: ./config/area.geojson
 startday: "20240101"
 endday:   "20240131"
+
 satellite:
   - sentinel2
-output: ./output
+
+band: all
+num: []
+
+cloudmask: [1, 3]
+snowmask: false
+
+activefire: none
 ```
 
-設定項目の詳細は [設定リファレンス](docs/configuration.md) を参照してください。
+`config.yaml` には実行ごとに変更する可能性が高い項目だけを置いています。それ以外の詳細設定はコード側のデフォルトで動作するため、通常は編集不要です。設定項目の詳細は [設定リファレンス](docs/configuration.md) を参照してください。
 
 ### 3. FIRMS API キーを設定する（熱異常データが必要な場合）
 
@@ -163,7 +171,7 @@ EARTHDATA_USERNAME=your_username
 EARTHDATA_PASSWORD=your_password
 ```
 
-詳細は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectance-設定nasa-earthdata) を参照してください。
+詳細は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectancenasa-earthdata) を参照してください。
 
 ### 5. 実行する
 
@@ -306,21 +314,20 @@ output/
 │   │   └── aqua/              # MYD09GA (Aqua, Terraとは別ファイル)
 │   │       ├── 500m/
 │   │       └── qa/
-│   ├── activefire/       # MODIS 熱異常 Shapefile
-│   └── activefire_tif/   # MODIS 熱異常ピクセルラスタ
+│   └── activefire/       # MODIS 熱異常 Shapefile（point/event data）
 └── viirs/
     ├── surface_reflectance/
     │   └── snpp/               # VNP09GA (Suomi-NPP)
     │       ├── 500m/           # I1-I3 (native ~463m)
     │       ├── 1km/            # M1-M5,M7,M8,M10,M11 (native ~927m, 500mへ集約しない)
     │       └── qa/             # QF1-QF7, land_water_mask (raw, unscaled)
-    ├── activefire/       # VIIRS 熱異常 Shapefile
-    └── activefire_tif/   # VIIRS 熱異常ピクセルラスタ
+    └── activefire/       # VIIRS 熱異常 Shapefile（point/event data）
 ```
 
 > `img/` はシーン単位の生データを保存します。それ以外（`masked` / `snowmasked` / `cloudmask`）は同日コンポジット後の結果です。
 > `metadata.enabled: true` にすると、撮影メタデータ GeoJSON が `img/` 配下に保存されます。
-> MODIS/VIIRS の `surface_reflectance/` は NASA Earthdata から直接取得したもので、Sentinel-2/Landsat とは独立した処理系です。設定は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectance-設定nasa-earthdata) を参照してください。
+> MODIS/VIIRS の `surface_reflectance/` は NASA Earthdata から直接取得したもので、Sentinel-2/Landsat とは独立した処理系です。設定は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectancenasa-earthdata) を参照してください。
+> `activefire/` の主出力は元の point/event data（Shapefile）です。ピクセルラスタ（`activefire_tif/`）はデフォルトでは生成されません（`firms.pixel_tif: true` で再度有効化できます。詳細は [設定リファレンス](docs/configuration.md#firms-熱異常データの詳細設定api-キー) を参照してください）。
 
 ---
 

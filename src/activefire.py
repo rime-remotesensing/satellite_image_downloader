@@ -24,11 +24,50 @@ except ImportError as exc:  # pragma: no cover
     raise RuntimeError("pyshp is required. Please install pyshp.") from exc
 
 from .config import _load_env_kv_file, _normalize_firms_products, _resolve_runtime_path
-from .constants import WGS84
+from .constants import (
+    FIRMS_DEFAULT_BASE_URL,
+    FIRMS_DEFAULT_BBOX_BUFFER_M,
+    FIRMS_DEFAULT_CLIP_TO_AOI,
+    FIRMS_DEFAULT_DAYS,
+    FIRMS_DEFAULT_KEY_ENV_PATH,
+    FIRMS_DEFAULT_PERIOD_SUMMARY,
+    FIRMS_DEFAULT_PIXEL_EXPAND_TO_DETECTIONS,
+    FIRMS_DEFAULT_PIXEL_RESOLUTION,
+    FIRMS_DEFAULT_PIXEL_TIF,
+    FIRMS_SOURCE_BY_LEVEL,
+    WGS84,
+)
 from .geometry import _expand_bbox_by_meters, _point_in_geometry
 from .imagery import _crs_to_string
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_firms_product_map(level: str) -> Dict[str, List[str]]:
+    """Build {"modis": [...], "viirs": [...]} FIRMS source lists for the
+    simplified `activefire: SP`/`NRT` config setting.
+
+    Platforms with no known source for the requested level (e.g. VIIRS
+    NOAA-21 has no Standard Processing source) are skipped with an explicit
+    warning -- never silently substituted with a different level's source.
+    """
+    level_map = FIRMS_SOURCE_BY_LEVEL[level]
+    product_map: Dict[str, List[str]] = {}
+    for family, platforms in level_map.items():
+        sources: List[str] = []
+        for platform, source in platforms.items():
+            if source is None:
+                LOGGER.warning(
+                    "FIRMS: no %s source available for VIIRS platform '%s'; skipping "
+                    "(activefire: %s).",
+                    level.upper(),
+                    platform,
+                    level.upper(),
+                )
+                continue
+            sources.append(source)
+        product_map[family] = sources
+    return product_map
 
 
 def _safe_shp_field_name(name: str, used: set[str]) -> str:
@@ -381,10 +420,11 @@ def _process_activefire(
     start_date: date,
     end_date: date,
     satellites: List[str],
+    product_map_override: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     firms_cfg = config.get("firms", {})
 
-    key_env_path_value = str(firms_cfg.get("key_env_path", "key.env")).strip() or "key.env"
+    key_env_path_value = str(firms_cfg.get("key_env_path", FIRMS_DEFAULT_KEY_ENV_PATH)).strip() or FIRMS_DEFAULT_KEY_ENV_PATH
     key_env_path = _resolve_runtime_path(key_env_path_value, config_dir, must_exist=False)
     env_values = _load_env_kv_file(key_env_path)
 
@@ -410,7 +450,7 @@ def _process_activefire(
         )
         return {"modis": 0, "viirs": 0}
 
-    bbox_buffer_m = max(0.0, float(firms_cfg.get("bbox_buffer_m", 0)))
+    bbox_buffer_m = max(0.0, float(firms_cfg.get("bbox_buffer_m", FIRMS_DEFAULT_BBOX_BUFFER_M)))
     if bbox_buffer_m > 0:
         original_bbox = bbox
         bbox = _expand_bbox_by_meters(bbox, bbox_buffer_m)
@@ -421,30 +461,29 @@ def _process_activefire(
             bbox,
         )
 
-    base_url = str(
-        firms_cfg.get(
-            "base_url",
-            "https://firms.modaps.eosdis.nasa.gov/api/area/csv",
-        )
-    )
+    base_url = str(firms_cfg.get("base_url", FIRMS_DEFAULT_BASE_URL))
 
-    product_map = firms_cfg.get("product_map", {})
-    modis_products = _normalize_firms_products(
-        product_map.get("modis"),
-        default_products=[],
-        field_name="config.firms.product_map.modis",
-    )
-    viirs_products = _normalize_firms_products(
-        product_map.get("viirs"),
-        default_products=[],
-        field_name="config.firms.product_map.viirs",
-    )
+    if product_map_override is not None:
+        modis_products = list(product_map_override.get("modis", []))
+        viirs_products = list(product_map_override.get("viirs", []))
+    else:
+        product_map = firms_cfg.get("product_map", {})
+        modis_products = _normalize_firms_products(
+            product_map.get("modis"),
+            default_products=[],
+            field_name="config.firms.product_map.modis",
+        )
+        viirs_products = _normalize_firms_products(
+            product_map.get("viirs"),
+            default_products=[],
+            field_name="config.firms.product_map.viirs",
+        )
     products_by_sat = {
         "modis": modis_products,
         "viirs": viirs_products,
     }
 
-    requested_days = int(firms_cfg.get("days", 5))
+    requested_days = int(firms_cfg.get("days", FIRMS_DEFAULT_DAYS))
     days = max(1, min(requested_days, 5))
     if requested_days != days:
         LOGGER.warning(
@@ -453,11 +492,13 @@ def _process_activefire(
             days,
         )
 
-    period_summary_enabled = bool(firms_cfg.get("period_summary", True))
-    clip_to_aoi = bool(firms_cfg.get("clip_to_aoi", True))
-    pixel_tif_enabled = bool(firms_cfg.get("pixel_tif", True))
-    pixel_resolution = max(1.0, float(firms_cfg.get("pixel_resolution", 10.0)))
-    pixel_expand_to_detections = bool(firms_cfg.get("pixel_expand_to_detections", True))
+    period_summary_enabled = bool(firms_cfg.get("period_summary", FIRMS_DEFAULT_PERIOD_SUMMARY))
+    clip_to_aoi = bool(firms_cfg.get("clip_to_aoi", FIRMS_DEFAULT_CLIP_TO_AOI))
+    pixel_tif_enabled = bool(firms_cfg.get("pixel_tif", FIRMS_DEFAULT_PIXEL_TIF))
+    pixel_resolution = max(1.0, float(firms_cfg.get("pixel_resolution", FIRMS_DEFAULT_PIXEL_RESOLUTION)))
+    pixel_expand_to_detections = bool(
+        firms_cfg.get("pixel_expand_to_detections", FIRMS_DEFAULT_PIXEL_EXPAND_TO_DETECTIONS)
+    )
 
     activefire_output_crs = reference_crs or "EPSG:4326"
     LOGGER.info("Activefire output CRS (fixed): %s", activefire_output_crs)
