@@ -20,15 +20,14 @@ import rasterio
 from pystac.item import Item
 from pystac_client import Client
 from rasterio.enums import Resampling
-from rasterio.features import bounds as geometry_bounds
 from rasterio.transform import Affine, from_origin
 from rasterio.vrt import WarpedVRT
-from rasterio.warp import reproject, transform_geom
+from rasterio.warp import reproject
 
 from omnicloudmask import predict_from_array
 
 from .config import _as_bool
-from .geometry import _bbox_from_geometry, _estimate_utm_crs_from_geometry
+from .geometry import _estimate_utm_crs_from_geometry, _target_grid_bounds
 from .constants import (
     CLOUDMASK_REQUIRED_BANDS,
     DEFAULT_FILE_EXISTS,
@@ -482,39 +481,13 @@ def _build_grid_for_item(
                 if output_crs_override:
                     target_crs = rasterio.crs.CRS.from_string(output_crs_override)
 
-                if use_bbox_extent:
-                    west, south, east, north = _bbox_from_geometry(geometry_wgs84)
-                    bbox_geom_wgs84 = {
-                        "type": "Polygon",
-                        "coordinates": [[
-                            [west, south],
-                            [east, south],
-                            [east, north],
-                            [west, north],
-                            [west, south],
-                        ]],
-                    }
-                    geom_in_item_crs = transform_geom(
-                        "EPSG:4326",
-                        target_crs.to_string(),
-                        bbox_geom_wgs84,
-                        precision=6,
-                    )
-                else:
-                    geom_in_item_crs = transform_geom(
-                        "EPSG:4326",
-                        target_crs.to_string(),
-                        geometry_wgs84,
-                        precision=6,
-                    )
-
-                left, bottom, right, top = geometry_bounds(geom_in_item_crs)
-
-                if snap_to_resolution_grid:
-                    left = math.floor(left / target_resolution) * target_resolution
-                    bottom = math.floor(bottom / target_resolution) * target_resolution
-                    right = math.ceil(right / target_resolution) * target_resolution
-                    top = math.ceil(top / target_resolution) * target_resolution
+                geom_in_item_crs, (left, bottom, right, top) = _target_grid_bounds(
+                    geometry_wgs84,
+                    target_crs.to_string(),
+                    target_resolution,
+                    use_bbox_extent=use_bbox_extent,
+                    snap_to_resolution_grid=snap_to_resolution_grid,
+                )
 
                 width = max(1, int(math.ceil((right - left) / target_resolution)))
                 height = max(1, int(math.ceil((top - bottom) / target_resolution)))
