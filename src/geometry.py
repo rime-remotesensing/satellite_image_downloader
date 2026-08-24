@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict, List, Tuple
 
 from rasterio.features import bounds as geometry_bounds
+from rasterio.warp import transform_geom
 
 
 def _load_aoi_geometry(geojson_path: Any) -> Dict[str, Any]:
@@ -65,6 +66,55 @@ def _estimate_utm_crs_from_geometry(geometry: Dict[str, Any]) -> str:
     center_lon = (west + east) / 2.0
     center_lat = (south + north) / 2.0
     return _utm_epsg_from_lonlat(center_lon, center_lat)
+
+
+def _target_grid_bounds(
+    geometry_wgs84: Dict[str, Any],
+    target_crs: str,
+    resolution_m: float,
+    *,
+    use_bbox_extent: bool = True,
+    snap_to_resolution_grid: bool = True,
+) -> Tuple[Dict[str, Any], Tuple[float, float, float, float]]:
+    """AOI geometry and target-grid bounds in `target_crs`.
+
+    Shared by the Sentinel-2/Landsat GEE-compatible grid (imagery.py) and the
+    MODIS/VIIRS Surface Reflectance reprojection (surface_reflectance.py) so
+    both land on the exact same (left, bottom, right, top) rectangle for a
+    given AOI + target CRS + snap resolution.
+
+    If `use_bbox_extent`, the AOI's WGS84 bounding-box rectangle is used
+    instead of its exact polygon shape (matching an `ee.Geometry.Rectangle`
+    export region). If `snap_to_resolution_grid`, bounds are snapped outward
+    to `resolution_m`-aligned coordinates.
+
+    Returns (AOI geometry reprojected into target_crs, (left, bottom, right, top)).
+    """
+    if use_bbox_extent:
+        west, south, east, north = _bbox_from_geometry(geometry_wgs84)
+        geom_wgs84 = {
+            "type": "Polygon",
+            "coordinates": [[
+                [west, south],
+                [east, south],
+                [east, north],
+                [west, north],
+                [west, south],
+            ]],
+        }
+    else:
+        geom_wgs84 = geometry_wgs84
+
+    geom_in_target = transform_geom("EPSG:4326", target_crs, geom_wgs84, precision=6)
+    left, bottom, right, top = _bbox_from_geometry(geom_in_target)
+
+    if snap_to_resolution_grid:
+        left = math.floor(left / resolution_m) * resolution_m
+        bottom = math.floor(bottom / resolution_m) * resolution_m
+        right = math.ceil(right / resolution_m) * resolution_m
+        top = math.ceil(top / resolution_m) * resolution_m
+
+    return geom_in_target, (left, bottom, right, top)
 
 
 def _expand_bbox_by_meters(

@@ -8,9 +8,9 @@ import os
 from pathlib import Path
 
 from src.config import _load_config
-from src.pipeline import run_pipeline, run_pipeline_from_config, satellite_image_downloader
+from src.pipeline import run_pipeline, run_pipeline_from_config
 
-# Region to config file mapping with hardcoded dates
+# Region to GeoJSON file mapping
 BATCH_MODE_REGIONS = [
     ("region01", "config/no1.geojson"),
     ("region02", "config/no2.geojson"),
@@ -24,80 +24,19 @@ BATCH_MODE_REGIONS = [
     ("region10", "config/no10.geojson"),
 ]
 
-# Hardcoded download dates extracted from existing snowmasked_terrain files
-# Format: region_name -> year -> list of dates (YYYYMMDD)
-REGION_DOWNLOAD_DATES = {
-    "region01": {
-        "2024": [
-            "20240116", "20240126", "20240210", "20240220",
-            "20240311", "20240316", "20240331", "20240410",
-        ]
-    },
-    "region02": {
-        "2024": [
-            "20240116", "20240126", "20240220",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-    "region03": {
-        "2024": [
-            "20240116", "20240126", "20240220",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-    "region04": {
-        "2024": [
-            "20240116", "20240126", "20240220",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-    "region05": {
-        "2023": ["20230121", "20230307"],
-        "2024": [
-            "20240116", "20240126", "20240220",
-            "20240316", "20240410",
-        ],
-        "2026": [
-            "20260301", "20260311", "20260316",
-            "20260321", "20260425",
-        ],
-    },
-    "region06": {
-        "2024": [
-            "20240116", "20240126", "20240210", "20240220",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-    "region07": {
-        "2024": [
-            "20240116", "20240126", "20240210", "20240220",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-    "region08": {
-        "2024": [
-            "20240116", "20240126", "20240210", "20240301",
-            "20240311", "20240316", "20240326", "20240410",
-        ]
-    },
-    "region09": {
-        "2024": [
-            "20240116", "20240126", "20240210",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-    "region10": {
-        "2024": [
-            "20240116", "20240126", "20240220",
-            "20240311", "20240316", "20240410",
-        ]
-    },
-}
+# Current batch download plan: MODIS/VIIRS daily Surface Reflectance +
+# FIRMS Active Fire for all regions, over one continuous date range.
+BATCH_STARTDAY = "20240201"
+BATCH_ENDDAY = "20240410"
+BATCH_SATELLITES = ["modis", "viirs"]
+# SP = Standard Processing (confirmed/science-quality). This range is well in
+# the past, so SP is used rather than NRT (NRT only covers recent data).
+BATCH_ACTIVEFIRE = "SP"
 
 BASE_PATH = Path(
     os.environ.get(
         "SATDL_BASE_PATH",
-        os.environ.get("SATDL_HOST_DATA_PATH", "/host_data") + "/your_project/output",
+        os.environ.get("SATDL_HOST_DATA_PATH", "/host_data") + "/aoi_rectangle/output",
     )
 )
 
@@ -115,7 +54,10 @@ def main() -> int:
     parser.add_argument(
         "--batch",
         action="store_true",
-        help="Force batch mode (download dates for all regions to their respective directories).",
+        help=(
+            "Force batch mode: download MODIS/VIIRS Surface Reflectance + FIRMS "
+            "Active Fire for all BATCH_MODE_REGIONS over BATCH_STARTDAY..BATCH_ENDDAY."
+        ),
     )
     parser.add_argument(
         "--img-only",
@@ -130,75 +72,53 @@ def main() -> int:
     )
     logger = logging.getLogger(__name__)
 
-    # Batch mode: use hardcoded dates for all regions
+    # Batch mode: MODIS/VIIRS Surface Reflectance + FIRMS Active Fire for
+    # every region in BATCH_MODE_REGIONS, over BATCH_STARTDAY..BATCH_ENDDAY.
     if args.batch or (args.config is None):
-        logger.info("Running in batch mode with hardcoded download dates...")
-        
+        logger.info(
+            "Running in batch mode: satellite=%s activefire=%s period=%s-%s",
+            BATCH_SATELLITES, BATCH_ACTIVEFIRE, BATCH_STARTDAY, BATCH_ENDDAY,
+        )
+
         all_results = {}
         for region_name, geojson_path in BATCH_MODE_REGIONS:
-            region_dates = REGION_DOWNLOAD_DATES.get(region_name, {})
-            
-            if not region_dates:
-                logger.warning(f"No download dates configured for {region_name}")
-                continue
+            logger.info(f"\nProcessing {region_name} ({geojson_path})...")
 
-            logger.info(f"\nProcessing {region_name}:")
-            
-            # Process each year in the region
-            for year in sorted(region_dates.keys()):
-                sdates = region_dates[year]
-                
-                if not sdates:
-                    logger.warning(f"  {year}: No dates found")
-                    continue
+            region_output_path = str(BASE_PATH / region_name)
+            config = {
+                "geojson": geojson_path,
+                "startday": BATCH_STARTDAY,
+                "endday": BATCH_ENDDAY,
+                "satellite": BATCH_SATELLITES,
+                "activefire": BATCH_ACTIVEFIRE,
+                "output": region_output_path,
+            }
 
-                logger.info(f"  {year}: {len(sdates)} dates (from {sdates[0]} to {sdates[-1]})")
-                
-                try:
-                    # Convert to list for satellite_image_downloader
-                    sdate_list = [int(d) for d in sdates]
-                    edate_list = [int(d) for d in sdates]
-                    
-                    logger.info(f"  Downloading {len(sdate_list)} dates for {region_name}/{year}...")
-                    
-                    # Output to region/year directory
-                    region_output_path = str(BASE_PATH / region_name / year)
-                    
-                    result = satellite_image_downloader(
-                        satellite_type=["sentinel2"],
-                        geojson_path=geojson_path,
-                        sdate=sdate_list,
-                        edate=edate_list,
-                        output_path=region_output_path,
-                        config_path="config/config.yaml",
-                        batch_mode=True,
-                        img_only=args.img_only,
-                        skip_satellite_subdir=True,
+            try:
+                result = run_pipeline(config=config, config_dir=Path.cwd())
+
+                failed_dates = 0
+                for key in ("modis_surface_reflectance", "viirs_surface_reflectance"):
+                    for platform_summary in (result.get(key) or {}).values():
+                        failed_dates += len(platform_summary.get("dates_failed", []))
+
+                all_results[region_name] = {
+                    "status": "partial" if failed_dates else "success",
+                    "failed_dates": failed_dates,
+                    "activefire": result.get("activefire"),
+                }
+                if failed_dates:
+                    logger.warning(
+                        "  %s completed with %s failed date(s)", region_name, failed_dates
                     )
-                    
-                    result_key = f"{region_name}/{year}"
-                    failed_items = int(result.get("failed_items", 0))
-                    all_results[result_key] = {
-                        "status": "partial" if failed_items else "success",
-                        "dates_processed": len(sdate_list),
-                        "total_runs": result.get("total_runs", 0),
-                        "failed_items": failed_items,
-                    }
-                    if failed_items:
-                        logger.warning(
-                            "  %s/%s completed with %s failed scene(s)",
-                            region_name,
-                            year,
-                            failed_items,
-                        )
-                    logger.info(f"  ✁E{region_name}/{year} completed")
-                    
-                except Exception as exc:
-                    logger.error(f"  ✁E{region_name}/{year} failed: {exc}", exc_info=True)
-                    all_results[f"{region_name}/{year}"] = {
-                        "status": "failed",
-                        "error": str(exc),
-                    }
+                logger.info(f"  {region_name} completed")
+
+            except Exception as exc:
+                logger.error(f"  {region_name} failed: {exc}", exc_info=True)
+                all_results[region_name] = {
+                    "status": "failed",
+                    "error": str(exc),
+                }
 
         logger.info("\n" + "="*60)
         logger.info("Batch download completed. Summary:")

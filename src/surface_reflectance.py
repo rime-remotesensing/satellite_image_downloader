@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -339,7 +340,7 @@ def _resolution_label(pixel_size_m: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Mosaic / AOI clip
+# Mosaic / AOI bounding-box crop (native Sinusoidal)
 # ---------------------------------------------------------------------------
 
 def _mosaic_tile_arrays(
@@ -383,14 +384,59 @@ def _mosaic_tile_arrays(
             memfile.close()
 
 
-def _aoi_geometry_in_crs(geometry_wgs84: Dict[str, Any], crs: rasterio.crs.CRS) -> Dict[str, Any]:
-    return transform_geom("EPSG:4326", crs, geometry_wgs84, precision=6)
+def _aoi_bbox_geometry_in_crs(
+    geometry_wgs84: Dict[str, Any],
+    crs: rasterio.crs.CRS,
+    edge_segments: int = 64,
+) -> Dict[str, Any]:
+    """Transform the AOI's minimum WGS84 bounding rectangle into native CRS.
+
+    The AOI itself may be an arbitrary Polygon/MultiPolygon.  We first form the
+    smallest axis-aligned WGS84 rectangle containing it.  The rectangle edges
+    are densified before transformation because straight lon/lat edges become
+    curved in the MODIS/VIIRS Sinusoidal projection.  Raster pixels themselves
+    are never reprojected or resampled.
+    """
+    west, south, east, north = geometry_bounds(geometry_wgs84)
+    n = max(1, int(edge_segments))
+
+    ring: List[List[float]] = []
+
+    # South edge: west -> east
+    for i in range(n + 1):
+        t = i / n
+        ring.append([west + (east - west) * t, south])
+
+    # East edge: south -> north (skip duplicated corner)
+    for i in range(1, n + 1):
+        t = i / n
+        ring.append([east, south + (north - south) * t])
+
+    # North edge: east -> west
+    for i in range(1, n + 1):
+        t = i / n
+        ring.append([east - (east - west) * t, north])
+
+    # West edge: north -> south, including closure at the first point
+    for i in range(1, n + 1):
+        t = i / n
+        ring.append([west, north - (north - south) * t])
+
+    bbox_wgs84 = {
+        "type": "Polygon",
+        "coordinates": [ring],
+    }
+    return transform_geom("EPSG:4326", crs, bbox_wgs84, precision=6)
 
 
 def _crop_window(
-    transform: Affine, height: int, width: int, aoi_geom: Dict[str, Any]
+    transform: Affine,
+    height: int,
+    width: int,
+    aoi_bbox_geom: Dict[str, Any],
 ) -> Tuple[Window, Affine]:
-    minx, miny, maxx, maxy = geometry_bounds(aoi_geom)
+    """Crop to the smallest native-pixel rectangle covering the requested bbox."""
+    minx, miny, maxx, maxy = geometry_bounds(aoi_bbox_geom)
     left = transform.c
     top = transform.f
     right = left + transform.a * width
@@ -401,15 +447,34 @@ def _crop_window(
     iy_min = max(miny, min(bottom, top))
     iy_max = min(maxy, max(bottom, top))
     if ix_min >= ix_max or iy_min >= iy_max:
-        raise ValueError("AOI does not intersect the downloaded tile mosaic extent")
+        raise ValueError("AOI bounding box does not intersect the downloaded tile mosaic extent")
 
-    window = from_bounds(ix_min, iy_min, ix_max, iy_max, transform=transform)
-    window = window.round_offsets(op="floor").round_lengths(op="ceil")
-    row_off = max(0, int(window.row_off))
-    col_off = max(0, int(window.col_off))
-    row_end = min(height, row_off + int(window.height))
-    col_end = min(width, col_off + int(window.width))
-    clipped_window = Window(col_off=col_off, row_off=row_off, width=col_end - col_off, height=row_end - row_off)
+    raw_window = from_bounds(
+        ix_min,
+        iy_min,
+        ix_max,
+        iy_max,
+        transform=transform,
+    )
+
+    # Snap outward to complete native pixels so the requested WGS84 bbox is
+    # never clipped by a fractional source pixel.
+    col_off = math.floor(raw_window.col_off)
+    row_off = math.floor(raw_window.row_off)
+    col_end = math.ceil(raw_window.col_off + raw_window.width)
+    row_end = math.ceil(raw_window.row_off + raw_window.height)
+
+    col_off = max(0, col_off)
+    row_off = max(0, row_off)
+    col_end = min(width, col_end)
+    row_end = min(height, row_end)
+
+    clipped_window = Window(
+        col_off=col_off,
+        row_off=row_off,
+        width=col_end - col_off,
+        height=row_end - row_off,
+    )
     out_transform = window_transform(clipped_window, transform)
     return clipped_window, out_transform
 
@@ -420,10 +485,6 @@ def _apply_window(array: np.ndarray, window: Window) -> np.ndarray:
     row_end = row_off + int(window.height)
     col_end = col_off + int(window.width)
     return array[row_off:row_end, col_off:col_end]
-
-
-def _outside_aoi_mask(transform: Affine, height: int, width: int, aoi_geom: Dict[str, Any]) -> np.ndarray:
-    return geometry_mask([aoi_geom], out_shape=(height, width), transform=transform, invert=False)
 
 
 def _apply_scale_offset(
@@ -449,6 +510,7 @@ def _write_geotiff_group(
     nodata: Optional[float],
     tags: Dict[str, Any],
     band_tags: List[Dict[str, Any]],
+    valid_footprint_mask: Optional[np.ndarray] = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     height, width = bands[0][1].shape
@@ -471,6 +533,13 @@ def _write_geotiff_group(
             dst.write(array.astype(dtype), idx)
             dst.set_band_description(idx, name)
             dst.update_tags(idx, **{k: str(v) for k, v in band_tags[idx - 1].items()})
+        if valid_footprint_mask is not None:
+            if valid_footprint_mask.shape != (height, width):
+                raise ValueError(
+                    f"GeoTIFF mask shape mismatch: mask={valid_footprint_mask.shape}, "
+                    f"raster={(height, width)}"
+                )
+            dst.write_mask(valid_footprint_mask.astype(np.uint8) * np.uint8(255))
         dst.update_tags(**{k: str(v) for k, v in tags.items()})
 
     sidecar_path = output_path.with_suffix(".json")
@@ -502,7 +571,11 @@ def _process_date_for_platform(
 ) -> Dict[str, Any]:
     field_specs = _FIELD_SPECS[satellite_key]
     crs = _sinusoidal_crs()
-    aoi_geom_native = _aoi_geometry_in_crs(aoi_geom_wgs84, crs) if clip_to_aoi else None
+    aoi_bbox_native = (
+        _aoi_bbox_geometry_in_crs(aoi_geom_wgs84, crs)
+        if clip_to_aoi
+        else None
+    )
 
     date_token = acq_date.strftime("%Y%m%d")
     tiles_used = sorted({_parse_granule_filename(f.name)[1] for f in granule_files})
@@ -531,14 +604,22 @@ def _process_date_for_platform(
         height, width = mosaic_array.shape
         pixel_size = abs(mosaic_transform.a)
 
-        if clip_to_aoi and aoi_geom_native is not None:
-            window, out_transform = _crop_window(mosaic_transform, height, width, aoi_geom_native)
+        if clip_to_aoi and aoi_bbox_native is not None:
+            window, out_transform = _crop_window(mosaic_transform, height, width, aoi_bbox_native)
             mosaic_array = _apply_window(mosaic_array, window)
             out_height, out_width = mosaic_array.shape
-            outside_mask = _outside_aoi_mask(out_transform, out_height, out_width, aoi_geom_native)
+            outside_bbox_mask = geometry_mask(
+                [aoi_bbox_native],
+                out_shape=(out_height, out_width),
+                transform=out_transform,
+                invert=False,
+                all_touched=True,
+            )
+            valid_footprint_mask = ~outside_bbox_mask
         else:
             out_transform = mosaic_transform
-            outside_mask = None
+            outside_bbox_mask = None
+            valid_footprint_mask = np.ones(mosaic_array.shape, dtype=bool)
 
         resolution_label = _resolution_label(pixel_size)
 
@@ -550,14 +631,14 @@ def _process_date_for_platform(
                 )
             offset = sds_meta.offset if sds_meta.offset is not None else 0.0
             processed = _apply_scale_offset(mosaic_array, sds_meta.scale, offset, sds_meta.fill_value)
-            if outside_mask is not None:
-                processed[outside_mask] = np.nan
+            if outside_bbox_mask is not None:
+                processed[outside_bbox_mask] = np.nan
         else:
             offset = None
             processed = mosaic_array
-            if outside_mask is not None and sds_meta.fill_value is not None:
+            if outside_bbox_mask is not None and sds_meta.fill_value is not None:
                 processed = processed.copy()
-                processed[outside_mask] = sds_meta.fill_value
+                processed[outside_bbox_mask] = sds_meta.fill_value
 
         groups[(kind, resolution_label)].append(
             {
@@ -570,6 +651,7 @@ def _process_date_for_platform(
                 "valid_range": sds_meta.valid_range,
                 "sds_path": sds_meta.sds_path,
                 "premask_shape": (height, width),
+                "valid_footprint_mask": valid_footprint_mask,
             }
         )
 
@@ -581,6 +663,14 @@ def _process_date_for_platform(
             raise RuntimeError(
                 f"{short_name} {platform_key} {date_token}: inconsistent array shapes within "
                 f"{kind}/{resolution_label} group: {shapes}"
+            )
+
+        footprint_masks = [e["valid_footprint_mask"] for e in entries]
+        valid_footprint_mask = footprint_masks[0]
+        if any(not np.array_equal(valid_footprint_mask, m) for m in footprint_masks[1:]):
+            raise RuntimeError(
+                f"{short_name} {platform_key} {date_token}: inconsistent footprint masks within "
+                f"{kind}/{resolution_label} group"
             )
 
         if kind == "sr":
@@ -635,6 +725,9 @@ def _process_date_for_platform(
             "kind": kind,
             "resolution_label": resolution_label,
             "clip_to_aoi": clip_to_aoi,
+            "crop_definition": "minimum_wgs84_bbox_touching_native_pixels",
+            "raster_reprojected": False,
+            "resampling": "none",
         }
 
         _write_geotiff_group(
@@ -646,6 +739,7 @@ def _process_date_for_platform(
             nodata=common_nodata,
             tags=dataset_tags,
             band_tags=band_tags,
+            valid_footprint_mask=valid_footprint_mask,
         )
         written_files.append(str(out_path))
 
