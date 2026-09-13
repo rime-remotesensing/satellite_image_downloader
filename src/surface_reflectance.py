@@ -23,6 +23,7 @@ from rasterio.windows import Window, from_bounds
 from rasterio.windows import transform as window_transform
 
 from .config import _as_bool, _load_env_kv_file, _resolve_runtime_path
+from .network_retry import call_with_network_retry
 from .constants import (
     MODIS_QA_BANDS,
     MODIS_SDS_NAME_MAP,
@@ -825,12 +826,15 @@ def _process_platform(
         return summary
 
     try:
-        granules = _search_granules(
-            short_name=short_name,
-            version=version,
-            bbox=bbox,
-            start_date=dates_to_process[0],
-            end_date=dates_to_process[-1],
+        granules = call_with_network_retry(
+            lambda: _search_granules(
+                short_name=short_name,
+                version=version,
+                bbox=bbox,
+                start_date=dates_to_process[0],
+                end_date=dates_to_process[-1],
+            ),
+            service="CMR",
         )
     except Exception as exc:
         LOGGER.error("CMR search failed for %s: %s", short_name, exc, exc_info=True)
@@ -853,7 +857,10 @@ def _process_platform(
 
             tmp_dir = tmp_root / date_token
             try:
-                local_files = _download_granules(day_granules, tmp_dir)
+                local_files = call_with_network_retry(
+                    lambda: _download_granules(day_granules, tmp_dir),
+                    service="Earthdata-download",
+                )
                 result = _process_date_for_platform(
                     satellite_key=satellite_key,
                     platform_key=platform_key,

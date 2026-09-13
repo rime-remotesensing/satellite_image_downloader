@@ -24,6 +24,7 @@ except ImportError as exc:  # pragma: no cover
     raise RuntimeError("pyshp is required. Please install pyshp.") from exc
 
 from .config import _load_env_kv_file, _normalize_firms_products, _resolve_runtime_path
+from .network_retry import call_with_network_retry
 from .constants import (
     FIRMS_DEFAULT_BASE_URL,
     FIRMS_DEFAULT_BBOX_BUFFER_M,
@@ -537,25 +538,18 @@ def _process_activefire(
             window_end = min(cursor + timedelta(days=days - 1), end_date)
             window_days = (window_end - cursor).days + 1
             for product in products:
-                try:
-                    part = _fetch_firms_rows(
+                part = call_with_network_retry(
+                    lambda: _fetch_firms_rows(
                         api_key=api_key,
                         product=product,
                         bbox=bbox,
                         days=window_days,
                         base_url=base_url,
                         start_on=cursor,
-                    )
-                    rows.extend(part)
-                except Exception as exc:
-                    LOGGER.warning(
-                        "FIRMS fetch failed for %s (%s) window %s..%s: %s",
-                        sat,
-                        product,
-                        cursor,
-                        window_end,
-                        exc,
-                    )
+                    ),
+                    service="FIRMS",
+                )
+                rows.extend(part)
             cursor = window_end + timedelta(days=1)
 
         filtered: Dict[str, List[Dict[str, str]]] = {}
