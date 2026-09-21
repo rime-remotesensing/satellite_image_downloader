@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rasterio
@@ -32,6 +32,8 @@ from .constants import (
     MODIS_SINUSOIDAL_Y_MAX,
     MODIS_SR_BANDS,
     MODIS_TILE_SIZE_M,
+    VIIRS_ALL_PLATFORMS,
+    VIIRS_DEFAULT_PLATFORMS,
     VIIRS_QA_BANDS,
     VIIRS_SDS_PATH_MAP,
     VIIRS_SR_BANDS_1KM,
@@ -569,6 +571,7 @@ def _process_date_for_platform(
     clip_to_aoi: bool,
     aoi_geom_wgs84: Dict[str, Any],
     file_exists_mode: str,
+    extra_tags: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     field_specs = _FIELD_SPECS[satellite_key]
     crs = _sinusoidal_crs()
@@ -715,6 +718,7 @@ def _process_date_for_platform(
             }
             for e in entries
         ]
+        out_transform_for_tags = entries[0]["transform"]
         dataset_tags = {
             "product": short_name,
             "product_version": version,
@@ -729,7 +733,12 @@ def _process_date_for_platform(
             "crop_definition": "minimum_wgs84_bbox_touching_native_pixels",
             "raster_reprojected": False,
             "resampling": "none",
+            "native_crs": crs.to_string(),
+            "native_transform": list(out_transform_for_tags)[:6],
+            "native_pixel_size_m": abs(out_transform_for_tags.a),
         }
+        if extra_tags:
+            dataset_tags.update(extra_tags)
 
         _write_geotiff_group(
             out_path,
@@ -783,6 +792,7 @@ def _process_platform(
     short_name: str,
     version: str,
     out_satellite_dir_name: str,
+    extra_tags: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     sr_cfg = config.get("surface_reflectance", {}) or {}
     clip_to_aoi = _as_bool(sr_cfg.get("clip_to_aoi"), default=True)
@@ -872,6 +882,7 @@ def _process_platform(
                     clip_to_aoi=clip_to_aoi,
                     aoi_geom_wgs84=geometry_wgs84,
                     file_exists_mode=file_exists_mode,
+                    extra_tags=extra_tags,
                 )
                 summary["dates_processed"].append(result)
             except Exception as exc:
@@ -933,6 +944,39 @@ def _process_modis_surface_reflectance(
     return result
 
 
+def _normalize_viirs_platforms(value: Any) -> List[str]:
+    """Validate config.surface_reflectance.viirs_platforms.
+
+    Unset -> VIIRS_DEFAULT_PLATFORMS (["snpp"]), preserving the exact
+    pre-existing snpp-only behavior for configs that don't opt in. An
+    explicit list is validated against the known platform keys and never
+    silently expanded or narrowed.
+    """
+    if value is None:
+        return list(VIIRS_DEFAULT_PLATFORMS)
+    if isinstance(value, str):
+        platforms = [v.strip().lower() for v in value.split(",") if v.strip()]
+    elif isinstance(value, Sequence):
+        platforms = [str(v).strip().lower() for v in value if str(v).strip()]
+    else:
+        raise ValueError("config.surface_reflectance.viirs_platforms must be string or list")
+
+    invalid = [p for p in platforms if p not in VIIRS_ALL_PLATFORMS]
+    if invalid:
+        raise ValueError(
+            f"Unsupported VIIRS platform(s) in config.surface_reflectance.viirs_platforms: "
+            f"{invalid}; supported: {VIIRS_ALL_PLATFORMS}"
+        )
+    if not platforms:
+        raise ValueError("config.surface_reflectance.viirs_platforms must not be empty")
+
+    deduped: List[str] = []
+    for p in platforms:
+        if p not in deduped:
+            deduped.append(p)
+    return deduped
+
+
 def _process_viirs_surface_reflectance(
     config: Dict[str, Any],
     config_dir: Path,
@@ -945,11 +989,19 @@ def _process_viirs_surface_reflectance(
     sr_cfg = config.get("surface_reflectance", {}) or {}
     products_cfg = (sr_cfg.get("products", {}) or {}).get("viirs", {}) or {}
     version = str(products_cfg.get("version", "002"))
-    snpp_short_name = str(products_cfg.get("snpp", "VNP09GA"))
+    platforms = _normalize_viirs_platforms(sr_cfg.get("viirs_platforms"))
 
-    LOGGER.info("Processing VIIRS SNPP surface reflectance (%s)...", snpp_short_name)
-    return {
-        "snpp": _process_platform(
+    default_short_names = {
+        "snpp": "VNP09GA",
+        "noaa20": "VJ109GA",
+        "noaa21": "VJ209GA",
+    }
+
+    result: Dict[str, Any] = {}
+    for platform_key in platforms:
+        short_name = str(products_cfg.get(platform_key, default_short_names[platform_key]))
+        LOGGER.info("Processing VIIRS %s surface reflectance (%s)...", platform_key, short_name)
+        result[platform_key] = _process_platform(
             config=config,
             config_dir=config_dir,
             output_root=output_root,
@@ -958,9 +1010,9 @@ def _process_viirs_surface_reflectance(
             start_date=start_date,
             end_date=end_date,
             satellite_key="viirs",
-            platform_key="snpp",
-            short_name=snpp_short_name,
+            platform_key=platform_key,
+            short_name=short_name,
             version=version,
             out_satellite_dir_name="viirs",
         )
-    }
+    return result

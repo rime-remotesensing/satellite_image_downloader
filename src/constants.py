@@ -99,9 +99,18 @@ SURFACE_REFLECTANCE_DEFAULT_PRODUCTS: Dict[str, Dict[str, str]] = {
     },
     "viirs": {
         "snpp": "VNP09GA",
+        "noaa20": "VJ109GA",
+        "noaa21": "VJ209GA",
         "version": "002",
     },
 }
+
+# Default set of VIIRS platforms processed when config.surface_reflectance
+# does not specify `viirs_platforms`. Kept to ["snpp"] so that existing
+# configs continue to download exactly what they did before NOAA-20/21
+# support was added -- multi-platform download is opt-in only.
+VIIRS_DEFAULT_PLATFORMS = ["snpp"]
+VIIRS_ALL_PLATFORMS = ["snpp", "noaa20", "noaa21"]
 
 # MOD09GA/MYD09GA.061: 500 m surface reflectance bands + required QA/state layers.
 MODIS_SR_BANDS = [f"sur_refl_b0{i}" for i in range(1, 8)]
@@ -127,6 +136,13 @@ VIIRS_QA_BANDS = ["QF1", "QF2", "QF3", "QF4", "QF5", "QF6", "QF7", "land_water_m
 # (confirmed via h5py inspection of a real granule on 2023-03-05). The file
 # also contains unrelated flat 1-D "_c" arrays at the top level with similar
 # names; those are intentionally never read.
+#
+# VJ109GA.002 (NOAA-20) and VJ209GA.002 (NOAA-21) were independently
+# confirmed via h5py inspection of real downloaded granules (2024-02-08,
+# tile h28v07) to use this identical HDFEOS Grid path layout, shapes
+# (2400x2400 / 1200x1200) and scale_factor/add_offset/_FillValue/valid_range
+# attribute conventions as VNP09GA -- this mapping is genuinely shared
+# across all three platforms, not assumed from product family naming.
 VIIRS_SDS_PATH_MAP: Dict[str, str] = {
     "I1": "HDFEOS/GRIDS/VIIRS_Grid_500m_2D/Data Fields/SurfReflect_I1_1",
     "I2": "HDFEOS/GRIDS/VIIRS_Grid_500m_2D/Data Fields/SurfReflect_I2_1",

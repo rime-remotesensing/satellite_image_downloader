@@ -11,8 +11,8 @@
 geojson: ./config/no5.geojson
 
 # Period（複数期間を順番に実行したい場合は配列で指定。startday/enddayは同じ要素数）
-startday: [20240322]
-endday:   [20240322]
+startday: [20230120, 20230121]
+endday:   [20230120, 20230121]
 
 # Satellite imagery
 # sentinel2 / landsat89: Microsoft Planetary Computer から取得
