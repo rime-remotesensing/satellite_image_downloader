@@ -4,12 +4,13 @@
 
 ## 機能
 
-- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2 / MODIS Terra・Aqua (MOD09GA/MYD09GA) / VIIRS Suomi-NPP (VNP09GA) / GCOM-C SGLI (L2 LAND RSRF)
+- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2 / MODIS Terra・Aqua (MOD09GA/MYD09GA) / VIIRS Suomi-NPP・NOAA-20・NOAA-21 (L2 swath VNP09/VJ109/VJ209。旧 VNP09GA ほかも選択可) / GCOM-C SGLI (L2 LAND RSRF)
 - **AOI クリッピング**: GeoJSON ポリゴンで任意の領域に切り抜き
 - **自動雲マスク**: [omnicloudmask](https://github.com/DPIRD-DMA/OmniCloudMask) による雲・影マスク（Sentinel-2/Landsat）
 - **雪マスク**: NDSI ベースの雪マスク（オプション、Sentinel-2/Landsat）
 - **同日コンポジット**: 同日の複数シーンを最小値合成で1枚に統合
 - **MODIS/VIIRS Surface Reflectance**: NASA Earthdata から native Sinusoidal グリッドのまま直接ダウンロード（再投影・リサンプリング・雲マスクなし、NASA公式QAを保持）
+- **VIIRS L2 swath（既定）**: VIIRS は既定で VNP09 / VJ109 / VJ209 の 6-minute L2 swath を使い、I バンドは fixed 375-m analysis grid、M バンドは fixed 750-m analysis grid（UTM 52N、研究対象地域用）へ nearest-neighbour で配置（nominal 375-m / 750-m VIIRS observations mapped to a fixed analysis grid。750 m → 375 m の upsample はせず、375 m は grid 間隔で実効分解能ではない）。overpass ごとの出力と、そこから選んだ日次 best observation を保存。旧 Daily L2G（VNP09GA ほか）は `surface_reflectance.viirs_product: daily_l2g_legacy` で利用可能（[設定リファレンス](docs/configuration.md#viirs-l2-swathvnp09--vj109--vj209-固定-375-m--750-m-grid)）
 - **GCOM-C/SGLI RSRF**: JAXA G-Portal（公開鍵認証の SFTP）から Level-2 LAND RSRF（version 3002、日次・descending）を取得。native 250 m（VN01–VN11, SW03）と native 1 km（SW01, SW02, SW04）を別グリッドのまま保存し、1 km → 250 m の upsample や super-resolution は行わない。SW02 は公式定義上 **TOA reflectance**（他の SW バンドは surface reflectance）
 - **熱異常（アクティブファイア）データ**: FIRMS MODIS/VIIRS の熱異常検知を point data（Shapefile）として取得（`activefire: SP`/`NRT`）
 - **GPU 対応**: CUDA GPU があれば omnicloudmask の推論を高速化
@@ -335,10 +336,14 @@ output/
 │   └── activefire/       # MODIS 熱異常 Shapefile（point/event data）
 └── viirs/
     ├── surface_reflectance/
-    │   └── snpp/               # VNP09GA (Suomi-NPP)
-    │       ├── 500m/           # I1-I3 (native ~463m)
-    │       ├── 1km/            # M1-M5,M7,M8,M10,M11 (native ~927m, 500mへ集約しない)
-    │       └── qa/             # QF1-QF7, land_water_mask (raw, unscaled)
+    │   └── snpp/               # noaa20/, noaa21/ も同じ構成
+    │       ├── l2_swath/       # 既定: VNP09 (L2 swath) を固定 UTM 52N grid へ配置
+    │       │   ├── overpass/   # overpass ごと: 375m/(I1-I3) 750m/(M bands) qa/ geometry/ provenance/
+    │       │   ├── daily/      # 日次 best observation（overpass 出力からの派生物）
+    │       │   └── summary/    # 日ごとの overpass・AOI 状態（JSON）
+    │       ├── 500m/           # 旧方式 (viirs_product: daily_l2g_legacy): VNP09GA I1-I3 (~463m)
+    │       ├── 1km/            # 旧方式: M1-M5,M7,M8,M10,M11 (~927m)
+    │       └── qa/             # 旧方式: QF1-QF7, land_water_mask (raw, unscaled)
     └── activefire/       # VIIRS 熱異常 Shapefile（point/event data）
 └── gcomc/
     └── rsrf/

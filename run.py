@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.config import _load_config
 from src.pipeline import run_pipeline, run_pipeline_from_config
+from src.viirs_l2 import PLATFORMS as VIIRS_L2_PLATFORMS
 
 # Region to GeoJSON file mapping
 BATCH_MODE_REGIONS = [
@@ -39,6 +40,36 @@ BASE_PATH = Path(
         os.environ.get("SATDL_HOST_DATA_PATH", "/host_data") + "/aoi_rectangle/output",
     )
 )
+
+
+def count_failed_dates(result: dict) -> int:
+    """Failed dates reported by the surface-reflectance processors in one run_pipeline() result.
+
+    Only the processors' own failure records are counted (no re-interpretation):
+      MODIS / legacy VIIRS GA : result[key][platform]["dates_failed"]
+      VIIRS L2 swath (default): result["viirs_l2_swath"][platform]["failed"]
+        (sibling keys such as "grid" / "raw_dir" are not platforms and are ignored)
+    AOI_OUTSIDE_SWATH / PARTIAL_OBSERVATION are observation states, not failures, and are
+    never listed under "failed". A platform-level "error" (e.g. a failed catalogue search)
+    is not a dated failure in either path and is not counted, as before.
+    """
+    failed = 0
+    for key in ("modis_surface_reflectance", "viirs_surface_reflectance"):
+        for platform_summary in (result.get(key) or {}).values():
+            failed += len(platform_summary.get("dates_failed", []))
+    for key, platform_summary in (result.get("viirs_l2_swath") or {}).items():
+        if key in VIIRS_L2_PLATFORMS:
+            failed += len(platform_summary.get("failed", []))
+    return failed
+
+
+def summarize_region_result(result: dict) -> dict:
+    failed_dates = count_failed_dates(result)
+    return {
+        "status": "partial" if failed_dates else "success",
+        "failed_dates": failed_dates,
+        "activefire": result.get("activefire"),
+    }
 
 
 def main() -> int:
@@ -97,16 +128,8 @@ def main() -> int:
             try:
                 result = run_pipeline(config=config, config_dir=Path.cwd())
 
-                failed_dates = 0
-                for key in ("modis_surface_reflectance", "viirs_surface_reflectance"):
-                    for platform_summary in (result.get(key) or {}).values():
-                        failed_dates += len(platform_summary.get("dates_failed", []))
-
-                all_results[region_name] = {
-                    "status": "partial" if failed_dates else "success",
-                    "failed_dates": failed_dates,
-                    "activefire": result.get("activefire"),
-                }
+                all_results[region_name] = summarize_region_result(result)
+                failed_dates = all_results[region_name]["failed_dates"]
                 if failed_dates:
                     logger.warning(
                         "  %s completed with %s failed date(s)", region_name, failed_dates

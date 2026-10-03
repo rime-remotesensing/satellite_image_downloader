@@ -17,9 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 GEOJSON = str(ROOT / "config" / "no5.geojson")
 
 
-def _config(tmp_path, satellites):
-    return {"geojson": GEOJSON, "startday": "20240409", "endday": "20240409", "satellite": satellites,
-            "output": str(tmp_path / "out"), "activefire": "none"}
+def _config(tmp_path, satellites, viirs_product=None):
+    cfg = {"geojson": GEOJSON, "startday": "20240409", "endday": "20240409", "satellite": satellites,
+           "output": str(tmp_path / "out"), "activefire": "none"}
+    if viirs_product:
+        cfg["surface_reflectance"] = {"viirs_product": viirs_product}
+    return cfg
 
 
 @pytest.fixture
@@ -27,13 +30,15 @@ def mocked_processors():
     with patch.object(pipeline, "_process_satellite_imagery", return_value={"ok": "img"}) as img, \
          patch.object(pipeline, "_process_modis_surface_reflectance", return_value={"ok": "modis"}) as modis, \
          patch.object(pipeline, "_process_viirs_surface_reflectance", return_value={"ok": "viirs"}) as viirs, \
+         patch("src.viirs_l2._process_viirs_l2_swath", return_value={"ok": "viirs_l2"}) as viirs_l2, \
          patch("src.gcomc._process_gcomc_surface_reflectance", return_value={"ok": "gcomc"}) as gcomc:
-        yield {"img": img, "modis": modis, "viirs": viirs, "gcomc": gcomc}
+        yield {"img": img, "modis": modis, "viirs": viirs, "viirs_l2": viirs_l2, "gcomc": gcomc}
 
 
 def test_existing_satellites_dispatch_unchanged_and_gcomc_not_called(tmp_path, mocked_processors):
     m = mocked_processors
-    result = pipeline.run_pipeline(_config(tmp_path, ["sentinel2", "landsat89", "modis", "viirs"]), ROOT)
+    # legacy VIIRS path requested explicitly: its call signature must be unchanged
+    result = pipeline.run_pipeline(_config(tmp_path, ["sentinel2", "landsat89", "modis", "viirs"], "daily_l2g_legacy"), ROOT)
     assert m["gcomc"].call_count == 0
     assert "gcomc_surface_reflectance" not in result
     assert [c.kwargs["satellite_key"] for c in m["img"].call_args_list] == ["sentinel2", "landsat89"]
@@ -48,7 +53,8 @@ def test_existing_satellites_dispatch_unchanged_and_gcomc_not_called(tmp_path, m
 def test_gcomc_opt_in_alongside_modis_viirs(tmp_path, mocked_processors):
     m = mocked_processors
     result = pipeline.run_pipeline(_config(tmp_path, ["modis", "viirs", "gcomc"]), ROOT)
-    assert m["modis"].call_count == m["viirs"].call_count == m["gcomc"].call_count == 1
+    assert m["modis"].call_count == m["viirs_l2"].call_count == m["gcomc"].call_count == 1   # VIIRS default = l2_swath
+    assert m["viirs"].call_count == 0
     kwargs = m["gcomc"].call_args.kwargs
     assert set(kwargs) == {"config", "config_dir", "output_root", "geometry_wgs84", "start_date", "end_date"}
     assert result["gcomc_surface_reflectance"] == {"ok": "gcomc"}
@@ -61,7 +67,8 @@ def test_runs_without_gcomc_never_import_the_module(tmp_path):
         from unittest.mock import patch
         from src import pipeline
         with patch.object(pipeline, "_process_modis_surface_reflectance", return_value={{}}), \\
-             patch.object(pipeline, "_process_viirs_surface_reflectance", return_value={{}}):
+             patch.object(pipeline, "_process_viirs_surface_reflectance", return_value={{}}), \\
+             patch("src.viirs_l2._process_viirs_l2_swath", return_value={{}}):
             pipeline.run_pipeline({json.dumps(_config(tmp_path, ["modis", "viirs"]))}, __import__("pathlib").Path({str(ROOT)!r}))
         print("GCOMC_LOADED" if "src.gcomc" in sys.modules else "GCOMC_NOT_LOADED")
     """)
