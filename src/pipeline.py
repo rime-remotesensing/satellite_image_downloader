@@ -25,6 +25,21 @@ from .surface_reflectance import (
 
 LOGGER = logging.getLogger(__name__)
 
+# VIIRS Surface Reflectance product family. "daily_l2g_legacy" = VNP09GA/VJ109GA/VJ209GA
+# (existing implementation); "l2_swath" = VNP09/VJ109/VJ209 on fixed UTM 375/750 m grids.
+# Default switched to l2_swath after the integration audit (2026-10-03); legacy stays available
+# by setting surface_reflectance.viirs_product: daily_l2g_legacy.
+VIIRS_PRODUCTS = ("daily_l2g_legacy", "l2_swath")
+VIIRS_DEFAULT_PRODUCT = "l2_swath"
+
+
+def _viirs_product(config: Dict[str, Any]) -> str:
+    sr_cfg = config.get("surface_reflectance", {}) or {}
+    value = str(sr_cfg.get("viirs_product", VIIRS_DEFAULT_PRODUCT)).strip().lower()
+    if value not in VIIRS_PRODUCTS:
+        raise ValueError(f"surface_reflectance.viirs_product must be one of {VIIRS_PRODUCTS} (got {value!r})")
+    return value
+
 
 def run_pipeline(
     config: Dict[str, Any],
@@ -147,7 +162,21 @@ def run_pipeline(
                 end_date=end_date,
             )
 
-        if "viirs" in satellites:
+        if "viirs" in satellites and _viirs_product(config) == "l2_swath":
+            # L2 swath (VNP09/VJ109/VJ209) -> fixed UTM 375/750 m grids; loaded only when selected.
+            from .viirs_l2 import _process_viirs_l2_swath
+
+            LOGGER.info("Processing VIIRS L2 swath surface reflectance... (%s-%s)", start_date, end_date)
+            summary["viirs_l2_swath"] = _process_viirs_l2_swath(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=geometry_wgs84,
+                bbox=bbox,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        elif "viirs" in satellites:
             LOGGER.info("Processing VIIRS surface reflectance... (%s-%s)", start_date, end_date)
             summary["viirs_surface_reflectance"] = _process_viirs_surface_reflectance(
                 config=config,

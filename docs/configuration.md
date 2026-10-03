@@ -210,6 +210,77 @@ output/viirs/surface_reflectance/snpp/qa/VNP09GA_snpp_20230301_QA_1km.tif
 
 各 GeoTIFF には元の SDS 名・scale・offset・fill value・product/platform/date/tile 情報がバンドタグ（および同名の `.json` サイドカー）として保存されます。
 
+#### VIIRS L2 swath（VNP09 / VJ109 / VJ209）→ 固定 375 m / 750 m grid
+
+`surface_reflectance.viirs_product` で VIIRS の取得方式を選びます。**既定は `l2_swath`** です（2026-10-03 に実データ統合監査を経て切り替え）。
+`satellite: [viirs]` だけを指定した場合も L2 swath 方式になります。
+
+| 値 | 内容 |
+|---|---|
+| `l2_swath`（既定） | 6-minute L2 swath（VNP09 / VJ109 / VJ209、collection 002）を固定 analysis grid へ配置 |
+| `daily_l2g_legacy` | 上記の Daily L2G（VNP09GA / VJ109GA / VJ209GA、sinusoidal 約 463 m / 926 m）。明示した場合のみ使用 |
+
+```yaml
+satellite:
+  - viirs
+surface_reflectance:
+  viirs_platforms: [snpp, noaa20, noaa21]   # 省略時は snpp のみ
+  # viirs_product: daily_l2g_legacy        # 旧方式を使う場合のみ明示
+```
+
+`l2_swath` の出力は「nominal 375-m / 750-m VIIRS L2 observations mapped to a fixed 375-m / 750-m analysis grid」です。
+I バンド（I1–I3）は IMG geolocation から fixed 375-m analysis grid へ、M バンド（M1–M5, M7, M8, M10, M11）は MOD geolocation から fixed 750-m analysis grid へ、
+それぞれ独立に nearest-neighbour で配置します。750 m バンドを 375 m へ upsample することはしません
+（モデル入力時に 750 m の 1 cell を対応する 375 m の 2×2 cell へ複製するのは、後段の前処理の役割です）。
+375 m は解析 grid の間隔であり、実効的な空間分解能ではありません。阿蘇では I バンドの実 source footprint が約 423〜800 m（天頂角による）になることを確認しています。
+
+- **固定 grid**: EPSG:32652（UTM zone 52N）。375 m / 750 m とも原点は E = 0, N = 0 で、セルの辺は 375 m / 750 m の整数倍。
+  これは現在の研究対象地域（阿蘇、zone 52 内）用の analysis grid で、他地域へ一般化できる規則ではありません。
+  grid 定義は `src/viirs_l2.py` の `AnalysisGridDefinition`（既定 `KYUSHU_UTM52N_GRID`）として交換可能です
+  AOI の窓は 750 m 単位で外側へスナップするため、750 m の 1 cell は 375 m の 2×2 cell と幾何学的に完全に一致します。
+  原点を granule の範囲から計算することはありません（全日付・全 platform で同じ grid）
+- **pairing**: L2 SR の `InputPointer` に記録された geolocation（VNP03IMG/MOD, VJ103IMG/MOD, VJ203IMG/MOD）のファイル名をそのまま使い、
+  OrbitNumber・開始/終了時刻の一致を確認します（collection 番号の一致では判定しません）
+- **配置**: 画素中心の nearest-neighbour。採用は source 画素の局所的な半対角以内のみ。bow-tie 削除画素は source から除外し、fill を補間しません。
+  同一 orbit の隣接 granule は 1 つの KD-tree で mosaic します（書き込み順に依存しない）
+- **overpass 出力**: overpass（orbit）ごとに必ず保存。AOI が swath 外の overpass は書き出さず summary に記録
+- **daily 出力**: overpass 出力からの派生物（平均・中央値の合成はしない）。正式な選択規則は、750 m cell ごとに
+  1. 全 M バンドの SR が有効 2. QF1 の雲の信頼度が低い 3. QF2 の影なし 4. センサー天頂角が小さい 5. 取得時刻が早い
+  の順で 1 つの overpass を選び、その 2×2 の 375 m cell も同じ overpass の I バンドを使います（別時刻の I と M を混ぜない）。
+  QF6（bit 定義に誤記あり）は選択・有効判定に使いません。
+  NASA の L2G（GA）は observation coverage を優先して日次観測を選ぶため、候補が 2 つある日には採用 orbit が GA と 5〜11% の cell で異なります。
+  これは意図したアルゴリズムの差で、本方式は GA の日次 composite を再現するものではありません
+- **QA**: QF1–QF7 と land_water_mask を raw の uint8 のまま保存。雲画素の反射率を NaN にしません
+- **出所の記録**: cell ごとに source granule、swath の行・列、スキャン時刻、source-to-target-centre distance を保存します
+  （阿蘇では I バンドの実 footprint が約 423〜800 m あり、grid の 375 m と混同しないため）
+- **観測のない cell**: 実観測の source が footprint 内にない cell（例: swath 最外縁で約 0.25%）は、補間・近傍値・人工的な値で埋めず、
+  AOI 状態を `PARTIAL_OBSERVATION` として記録します
+- **教師データとの対応**: burn-fraction の教師データを 375 m grid で作る前に、教師ラベル（PlanetScope 由来）の CRS を必ず確認してください
+
+出力（`<platform>` = snpp / noaa20 / noaa21）:
+
+```
+output/viirs/surface_reflectance/<platform>/l2_swath/
+  overpass/{375m,750m,qa,geometry,provenance}/<SR>_<platform>_<YYYYMMDD>_<HHMM>_o<orbit>_<group>.tif
+  daily/{375m,750m,qa,geometry,provenance}/<SR>_<platform>_<YYYYMMDD>_daily_<group>.tif
+  summary/<SR>_<platform>_<YYYYMMDD>.json
+```
+
+| group | grid | 内容 |
+|---|---|---|
+| `375m` | 375 m | I1, I2, I3（float32 反射率） |
+| `750m` | 750 m | M1, M2, M3, M4, M5, M7, M8, M10, M11（float32 反射率） |
+| `qa` / `qa_375m` | 750 m / 375 m | QF1–QF7, land_water_mask（raw uint8）/ IMG geolocation の land_water_mask |
+| `geometry_375m` / `geometry_750m` | 375 m / 750 m | sensor_zenith, sensor_azimuth, solar_zenith, solar_azimuth（度） |
+| `provenance_375m` / `provenance_750m` | 375 m / 750 m | source_granule, source_row, source_col, scan_time_unix, source_distance_m（daily は selected_orbit も） |
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `surface_reflectance.viirs_product` | `l2_swath` | `daily_l2g_legacy` で旧 Daily L2G 方式 |
+| `surface_reflectance.viirs_l2_raw_dir` | 環境変数 `VIIRS_L2_RAW_DIR`、なければ `<output>/viirs/_raw_l2` | L2 SR と geolocation の raw archive。有効なファイルは再利用し、削除しません |
+
+実データ監査は [viirs_l2_swath_smoke_test.md](viirs_l2_swath_smoke_test.md) を参照してください。
+
 ### GCOM-C/SGLI L2 RSRF（JAXA G-Portal）
 
 `satellite` に `gcomc` を含めると、JAXA G-Portal から GCOM-C/SGLI Level-2 LAND の大気補正済み反射率（RSRF、
