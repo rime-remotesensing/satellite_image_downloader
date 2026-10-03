@@ -1,0 +1,405 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       130.5407257080078,
+       40
+      ],
+      [
+       143.5948028564453,
+       40
+      ],
+      [
+       127.01705932617188,
+       30
+      ],
+      [
+       115.47005462646484,
+       30
+      ],
+      [
+       130.5407257080078,
+       40
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "identifier": "GC1SG1_20240409D01D_T0528_L2SG_RSRFQ_3002",
+    "acquisitionType": "NOMINAL",
+    "imageQualityDegradation": "",
+    "imageQualityDegradationQuotationMode": "",
+    "processingDate": "2024-04-09T15:51:05.00Z",
+    "processingLevel": "L2",
+    "ProductType": "S",
+    "status": "ARCHIVED",
+    "beginPosition": "2024-04-09T01:37:44.40Z",
+    "endPosition": "2024-04-09T03:21:32.40Z",
+    "platformShortName": "GCOM-C",
+    "instrumentShortName": "SGLI",
+    "sensorType": "OPTICAL",
+    "operationalMode": "NOMINAL",
+    "resolution": "",
+    "orbitNumber": "",
+    "lastOrbitNumber": "",
+    "DayNight": "",
+    "illuminationAzimuthAngle": "",
+    "illuminationElevationAngle": "",
+    "multiExtentOf": "130.54072570800781 40.00000000000000 143.59480285644531 40.00000000000000 127.01705932617188 30.00000000000000 115.47005462646484 30.00000000000000 130.54072570800781 40.00000000000000",
+    "centerOf": "",
+    "product": {
+     "fileName": "product.gportal.jaxa.jp:/products/Standard/GCOM-C/GCOM-C.SGLI/L2.LAND.RSRF/3/2024/04/09/GC1SG1_20240409D01D_T0528_L2SG_RSRFQ_3002.h5",
+     "size": "97517568",
+     "DataFormatType": "HDF5",
+     "version": "3"
+    },
+    "gpp": {
+     "datasetId": "10002015",
+     "totalQualityCode": "Good",
+     "cloudCoverPercentage": "70",
+     "operatorComment": "",
+     "compressFlag": "1",
+     "physicalQuantity": "Atmospheric corrected surface reflectance",
+     "Resolution": "250m",
+     "browseImageSize": "59",
+     "parameterVersion": "002",
+     "algorithmVersion": "3",
+     "numberPixels": "",
+     "numberLines": "",
+     "numberBands": "",
+     "numberMissingData": "",
+     "sceneNumber": "",
+     "startPathNumber": "",
+     "endPathNumber": "",
+     "startArgumentLat": "",
+     "endArgumentLat": "",
+     "mapProjection": "EQA",
+     "mapDirection": "True North",
+     "orbitDirection": "Descending",
+     "tileNo": "0528",
+     "channels": "",
+     "bandWidth": "",
+     "downlinkSegmentNumber": "",
+     "sensorOffPeriod": "",
+     "sceneCenterTime": "",
+     "startSubsatellitePosition": "",
+     "endSubsatellitePosition": "",
+     "ProcessTimeUnit": "01D",
+     "tileHNo": "28",
+     "tileVNo": "05",
+     "topicCategory": "-",
+     "organizationName": "JAXA",
+     "pseq": "EQ",
+     "hasProduct": "true"
+    }
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       130.5407257080078,
+       40
+      ],
+      [
+       143.5948028564453,
+       40
+      ],
+      [
+       127.01705932617188,
+       30
+      ],
+      [
+       115.47005462646484,
+       30
+      ],
+      [
+       130.5407257080078,
+       40
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "identifier": "GC1SG1_20240315A01D_T0528_L2SG_RSRFQ_3002",
+    "acquisitionType": "NOMINAL",
+    "imageQualityDegradation": "",
+    "imageQualityDegradationQuotationMode": "",
+    "processingDate": "2024-03-16T08:05:06.00Z",
+    "processingLevel": "L2",
+    "ProductType": "S",
+    "status": "ARCHIVED",
+    "beginPosition": "2024-03-15T12:17:52.80Z",
+    "endPosition": "2024-03-15T13:58:48.00Z",
+    "platformShortName": "GCOM-C",
+    "instrumentShortName": "SGLI",
+    "sensorType": "OPTICAL",
+    "operationalMode": "NOMINAL",
+    "resolution": "",
+    "orbitNumber": "",
+    "lastOrbitNumber": "",
+    "DayNight": "",
+    "illuminationAzimuthAngle": "",
+    "illuminationElevationAngle": "",
+    "multiExtentOf": "130.54072570800781 40.00000000000000 143.59480285644531 40.00000000000000 127.01705932617188 30.00000000000000 115.47005462646484 30.00000000000000 130.54072570800781 40.00000000000000",
+    "centerOf": "",
+    "product": {
+     "fileName": "product.gportal.jaxa.jp:/products/Standard/GCOM-C/GCOM-C.SGLI/L2.LAND.RSRF/3/2024/03/15/GC1SG1_20240315A01D_T0528_L2SG_RSRFQ_3002.h5",
+     "size": "3145728",
+     "DataFormatType": "HDF5",
+     "version": "3"
+    },
+    "gpp": {
+     "datasetId": "10002015",
+     "totalQualityCode": "Fair",
+     "cloudCoverPercentage": "16",
+     "operatorComment": "",
+     "compressFlag": "1",
+     "physicalQuantity": "Atmospheric corrected surface reflectance",
+     "Resolution": "250m",
+     "browseImageSize": "40",
+     "parameterVersion": "002",
+     "algorithmVersion": "3",
+     "numberPixels": "",
+     "numberLines": "",
+     "numberBands": "",
+     "numberMissingData": "",
+     "sceneNumber": "",
+     "startPathNumber": "",
+     "endPathNumber": "",
+     "startArgumentLat": "",
+     "endArgumentLat": "",
+     "mapProjection": "EQA",
+     "mapDirection": "True North",
+     "orbitDirection": "Ascending",
+     "tileNo": "0528",
+     "channels": "",
+     "bandWidth": "",
+     "downlinkSegmentNumber": "",
+     "sensorOffPeriod": "",
+     "sceneCenterTime": "",
+     "startSubsatellitePosition": "",
+     "endSubsatellitePosition": "",
+     "ProcessTimeUnit": "01D",
+     "tileHNo": "28",
+     "tileVNo": "05",
+     "topicCategory": "-",
+     "organizationName": "JAXA",
+     "pseq": "EQ",
+     "hasProduct": "true"
+    }
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       130.5407257080078,
+       40
+      ],
+      [
+       143.5948028564453,
+       40
+      ],
+      [
+       127.01705932617188,
+       30
+      ],
+      [
+       115.47005462646484,
+       30
+      ],
+      [
+       130.5407257080078,
+       40
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "identifier": "GC1SG1_20240315D01D_T0528_L2SG_RSRFQ_3002",
+    "acquisitionType": "NOMINAL",
+    "imageQualityDegradation": "",
+    "imageQualityDegradationQuotationMode": "",
+    "processingDate": "2024-03-16T14:30:39.00Z",
+    "processingLevel": "L2",
+    "ProductType": "S",
+    "status": "ARCHIVED",
+    "beginPosition": "2024-03-15T00:59:49.20Z",
+    "endPosition": "2024-03-15T02:43:37.20Z",
+    "platformShortName": "GCOM-C",
+    "instrumentShortName": "SGLI",
+    "sensorType": "OPTICAL",
+    "operationalMode": "NOMINAL",
+    "resolution": "",
+    "orbitNumber": "",
+    "lastOrbitNumber": "",
+    "DayNight": "",
+    "illuminationAzimuthAngle": "",
+    "illuminationElevationAngle": "",
+    "multiExtentOf": "130.54072570800781 40.00000000000000 143.59480285644531 40.00000000000000 127.01705932617188 30.00000000000000 115.47005462646484 30.00000000000000 130.54072570800781 40.00000000000000",
+    "centerOf": "",
+    "product": {
+     "fileName": "product.gportal.jaxa.jp:/products/Standard/GCOM-C/GCOM-C.SGLI/L2.LAND.RSRF/3/2024/03/15/GC1SG1_20240315D01D_T0528_L2SG_RSRFQ_3002.h5",
+     "size": "240123904",
+     "DataFormatType": "HDF5",
+     "version": "3"
+    },
+    "gpp": {
+     "datasetId": "10002015",
+     "totalQualityCode": "Good",
+     "cloudCoverPercentage": "8",
+     "operatorComment": "",
+     "compressFlag": "1",
+     "physicalQuantity": "Atmospheric corrected surface reflectance",
+     "Resolution": "250m",
+     "browseImageSize": "90",
+     "parameterVersion": "002",
+     "algorithmVersion": "3",
+     "numberPixels": "",
+     "numberLines": "",
+     "numberBands": "",
+     "numberMissingData": "",
+     "sceneNumber": "",
+     "startPathNumber": "",
+     "endPathNumber": "",
+     "startArgumentLat": "",
+     "endArgumentLat": "",
+     "mapProjection": "EQA",
+     "mapDirection": "True North",
+     "orbitDirection": "Descending",
+     "tileNo": "0528",
+     "channels": "",
+     "bandWidth": "",
+     "downlinkSegmentNumber": "",
+     "sensorOffPeriod": "",
+     "sceneCenterTime": "",
+     "startSubsatellitePosition": "",
+     "endSubsatellitePosition": "",
+     "ProcessTimeUnit": "01D",
+     "tileHNo": "28",
+     "tileVNo": "05",
+     "topicCategory": "-",
+     "organizationName": "JAXA",
+     "pseq": "EQ",
+     "hasProduct": "true"
+    }
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       143.5948028564453,
+       40
+      ],
+      [
+       156.6488800048828,
+       40
+      ],
+      [
+       138.56407165527344,
+       30
+      ],
+      [
+       127.01705932617188,
+       30
+      ],
+      [
+       143.5948028564453,
+       40
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "identifier": "GC1SG1_20240409D01D_T0529_L2SG_RSRFQ_3002",
+    "acquisitionType": "NOMINAL",
+    "imageQualityDegradation": "",
+    "imageQualityDegradationQuotationMode": "",
+    "processingDate": "2024-04-09T17:14:23.00Z",
+    "processingLevel": "L2",
+    "ProductType": "S",
+    "status": "ARCHIVED",
+    "beginPosition": "2024-04-09T01:37:30.00Z",
+    "endPosition": "2024-04-09T01:41:06.00Z",
+    "platformShortName": "GCOM-C",
+    "instrumentShortName": "SGLI",
+    "sensorType": "OPTICAL",
+    "operationalMode": "NOMINAL",
+    "resolution": "",
+    "orbitNumber": "",
+    "lastOrbitNumber": "",
+    "DayNight": "",
+    "illuminationAzimuthAngle": "",
+    "illuminationElevationAngle": "",
+    "multiExtentOf": "143.59480285644531 40.00000000000000 156.64888000488281 40.00000000000000 138.56407165527344 30.00000000000000 127.01705932617188 30.00000000000000 143.59480285644531 40.00000000000000",
+    "centerOf": "",
+    "product": {
+     "fileName": "product.gportal.jaxa.jp:/products/Standard/GCOM-C/GCOM-C.SGLI/L2.LAND.RSRF/3/2024/04/09/GC1SG1_20240409D01D_T0529_L2SG_RSRFQ_3002.h5",
+     "size": "163577856",
+     "DataFormatType": "HDF5",
+     "version": "3"
+    },
+    "gpp": {
+     "datasetId": "10002015",
+     "totalQualityCode": "Good",
+     "cloudCoverPercentage": "91",
+     "operatorComment": "",
+     "compressFlag": "1",
+     "physicalQuantity": "Atmospheric corrected surface reflectance",
+     "Resolution": "250m",
+     "browseImageSize": "72",
+     "parameterVersion": "002",
+     "algorithmVersion": "3",
+     "numberPixels": "",
+     "numberLines": "",
+     "numberBands": "",
+     "numberMissingData": "",
+     "sceneNumber": "",
+     "startPathNumber": "",
+     "endPathNumber": "",
+     "startArgumentLat": "",
+     "endArgumentLat": "",
+     "mapProjection": "EQA",
+     "mapDirection": "True North",
+     "orbitDirection": "Descending",
+     "tileNo": "0529",
+     "channels": "",
+     "bandWidth": "",
+     "downlinkSegmentNumber": "",
+     "sensorOffPeriod": "",
+     "sceneCenterTime": "",
+     "startSubsatellitePosition": "",
+     "endSubsatellitePosition": "",
+     "ProcessTimeUnit": "01D",
+     "tileHNo": "29",
+     "tileVNo": "05",
+     "topicCategory": "-",
+     "organizationName": "JAXA",
+     "pseq": "EQ",
+     "hasProduct": "true"
+    }
+   }
+  }
+ ],
+ "properties": {
+  "numberOfRecordsMatched": 4,
+  "numberOfRecordsReturned": 4
+ }
+}

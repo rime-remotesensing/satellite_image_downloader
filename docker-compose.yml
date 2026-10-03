@@ -27,6 +27,30 @@ services:
     tty: true
     shm_size: "8gb"
 
+  # GCOM-C/SGLI (JAXA G-Portal) tools. Opt-in via the "gcomc" profile so the
+  # default `downloader` service never depends on G-Portal settings. Run with:
+  #   docker compose --env-file key.env --profile gcomc run --rm gcomc <command>
+  # key.env (git-ignored) must define GPORTAL_USERNAME and
+  # GPORTAL_PRIVATE_KEY_HOST_PATH (host path of the G-Portal SFTP private key).
+  # The key is bind-mounted read-only; it is never copied into the repository.
+  gcomc:
+    profiles: ["gcomc"]
+    image: satellite-downloader:latest
+    working_dir: /workspace
+    environment:
+      GPORTAL_USERNAME: ${GPORTAL_USERNAME:-}
+      # Raw HDF5 cache/archive used by src/gcomc.py (valid local files are reused, not re-downloaded).
+      GCOMC_RAW_DIR: /gcomc_data/raw
+    volumes:
+      - ./:/workspace
+      # Raw G-Portal HDF5 downloads live outside the repository.
+      - ${GCOMC_HOST_DATA_PATH:-../satellite_image_downloader_gcomc_data}:/gcomc_data
+      - type: bind
+        source: ${GPORTAL_PRIVATE_KEY_HOST_PATH:-}
+        target: /run/secrets/gportal_privatekey.key
+        read_only: true
+    command: ["python3", "-c", "print('specify a command')"]
+
 volumes:
   satdl_model_cache:
   satdl_model_data:

@@ -159,6 +159,20 @@ def run_pipeline(
                 end_date=end_date,
             )
 
+        if "gcomc" in satellites:
+            # Opt-in only: imported lazily so runs without "gcomc" never load the module.
+            from .gcomc import _process_gcomc_surface_reflectance
+
+            LOGGER.info("Processing GCOM-C/SGLI RSRF... (%s-%s)", start_date, end_date)
+            summary["gcomc_surface_reflectance"] = _process_gcomc_surface_reflectance(
+                config=config,
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=geometry_wgs84,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
         if not img_only and include_activefire and activefire_targets:
             activefire_crs_ref = None
             activefire_reference_raster = None

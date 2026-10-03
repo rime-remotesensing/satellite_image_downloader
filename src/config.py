@@ -101,7 +101,7 @@ def _normalize_satellites(value: Any) -> List[str]:
     else:
         raise ValueError("config.satellite must be string or list")
 
-    allowed = {"sentinel2", "landsat89", "modis", "viirs"}
+    allowed = {"sentinel2", "landsat89", "modis", "viirs", "gcomc"}
     invalid = [s for s in sats if s not in allowed]
     if invalid:
         raise ValueError(f"Unsupported satellites in config: {invalid}")
