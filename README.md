@@ -1,15 +1,16 @@
 # satellite-image-downloader
 
-[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/) から Sentinel-2 / Landsat 8・9 衛星画像を、[NASA Earthdata](https://urs.earthdata.nasa.gov/) から MODIS/VIIRS の daily Surface Reflectance を、[NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) から熱異常（アクティブファイア）データを自動ダウンロード・前処理する設定ファイル駆動のパイプラインです。
+[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/) から Sentinel-2 / Landsat 8・9 衛星画像を、[NASA Earthdata](https://urs.earthdata.nasa.gov/) から MODIS/VIIRS の daily Surface Reflectance を、[JAXA G-Portal](https://www.gportal.jaxa.jp/) から GCOM-C/SGLI の L2 大気補正済み反射率（RSRF）を、[NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) から熱異常（アクティブファイア）データを自動ダウンロード・前処理する設定ファイル駆動のパイプラインです。
 
 ## 機能
 
-- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2 / MODIS Terra・Aqua (MOD09GA/MYD09GA) / VIIRS Suomi-NPP (VNP09GA)
+- **対応衛星**: Sentinel-2 L2A / Landsat 8・9 L2 / MODIS Terra・Aqua (MOD09GA/MYD09GA) / VIIRS Suomi-NPP (VNP09GA) / GCOM-C SGLI (L2 LAND RSRF)
 - **AOI クリッピング**: GeoJSON ポリゴンで任意の領域に切り抜き
 - **自動雲マスク**: [omnicloudmask](https://github.com/DPIRD-DMA/OmniCloudMask) による雲・影マスク（Sentinel-2/Landsat）
 - **雪マスク**: NDSI ベースの雪マスク（オプション、Sentinel-2/Landsat）
 - **同日コンポジット**: 同日の複数シーンを最小値合成で1枚に統合
 - **MODIS/VIIRS Surface Reflectance**: NASA Earthdata から native Sinusoidal グリッドのまま直接ダウンロード（再投影・リサンプリング・雲マスクなし、NASA公式QAを保持）
+- **GCOM-C/SGLI RSRF**: JAXA G-Portal（公開鍵認証の SFTP）から Level-2 LAND RSRF（version 3002、日次・descending）を取得。native 250 m（VN01–VN11, SW03）と native 1 km（SW01, SW02, SW04）を別グリッドのまま保存し、1 km → 250 m の upsample や super-resolution は行わない。SW02 は公式定義上 **TOA reflectance**（他の SW バンドは surface reflectance）
 - **熱異常（アクティブファイア）データ**: FIRMS MODIS/VIIRS の熱異常検知を point data（Shapefile）として取得（`activefire: SP`/`NRT`）
 - **GPU 対応**: CUDA GPU があれば omnicloudmask の推論を高速化
 - **Docker 対応**: 依存関係を含む再現可能な実行環境
@@ -173,6 +174,23 @@ EARTHDATA_PASSWORD=your_password
 
 詳細は [設定リファレンス](docs/configuration.md#modisviirs-surface-reflectancenasa-earthdata) を参照してください。
 
+### 4b. G-Portal 認証情報を設定する（GCOM-C/SGLI が必要な場合）
+
+[新 G-Portal](https://www.gportal.jaxa.jp/) でユーザー登録し、Web 上で SFTP 用の秘密鍵を発行してリポジトリ外に保存します（SFTP は公開鍵認証のみ）。`key.env` に追記：
+
+```
+GPORTAL_USERNAME=your_gportal_account
+GPORTAL_PRIVATE_KEY_HOST_PATH=C:/Users/you/.ssh/gportal_privatekey.key
+```
+
+秘密鍵は docker compose の `gcomc` サービスでコンテナ内 `/run/secrets/gportal_privatekey.key` に read-only でマウントされ、リポジトリにはコピーされません。`satellite` に `gcomc` を加えて実行します：
+
+```bash
+docker compose --env-file key.env --profile gcomc run --rm gcomc python3 run.py --config config/config.yaml
+```
+
+詳細は [設定リファレンス](docs/configuration.md#gcom-csgli-l2-rsrfjaxa-g-portal) を参照してください。
+
 ### 5. 実行する
 
 ```bash
@@ -322,6 +340,12 @@ output/
     │       ├── 1km/            # M1-M5,M7,M8,M10,M11 (native ~927m, 500mへ集約しない)
     │       └── qa/             # QF1-QF7, land_water_mask (raw, unscaled)
     └── activefire/       # VIIRS 熱異常 Shapefile（point/event data）
+└── gcomc/
+    └── rsrf/
+        ├── 250m/              # VN01-VN11, SW03（native ~232m, float32 反射率）
+        ├── 1km/               # SW01, SW02(TOA), SW04（native ~927m, 250mへ upsample しない）
+        ├── qa/                # QA_flag, Land_water_flag, Obs_time（raw, unscaled）
+        └── summary/           # 日付ごとのプロダクト状態・AOI 観測状態（JSON）
 ```
 
 > `img/` はシーン単位の生データを保存します。それ以外（`masked` / `snowmasked` / `cloudmask`）は同日コンポジット後の結果です。
@@ -346,6 +370,8 @@ output/
 - **Sentinel-2 処理基準**: `s2:processing_baseline >= 4.0` のシーンは `RADIO_ADD_OFFSET`（1000 DN）を自動補正します。反射率変換（÷10000）は `masked`/`snowmasked` 等の後段で適用します。
 - **FIRMS リクエスト制限**: FIRMS area API は1リクエストあたり最大5日間です。長い期間は内部で自動分割して取得・統合します。
 - **熱異常データの CRS**: AOI に対応する Sentinel-2 画像の CRS に合わせます（判定できない場合は EPSG:4326）。
+- **GCOM-C/SGLI の観測頻度**: CSW に毎日 record があっても、AOI がその日のスワス外で全画素 no data のことがあります（阿蘇では概ね2日観測・2日欠測）。この日は `AOI_NO_DATA` として GeoTIFF を作らず、summary JSON にだけ記録します。日付は毎日走査します。
+- **GCOM-C/SGLI の雲**: 雲画素にも反射率値が入っています。downloader は雲を除去しません（QA_flag を使った雲除去は後段の役割です）。実データ監査の記録は [docs/gcomc_rsrf_smoke_test.md](docs/gcomc_rsrf_smoke_test.md) を参照してください。
 - **モデルキャッシュ**: 初回実行時に omnicloudmask がモデルをダウンロードします。Docker では名前付きボリュームにキャッシュされるため、2回目以降は再ダウンロード不要です。
 
 ## ライセンス

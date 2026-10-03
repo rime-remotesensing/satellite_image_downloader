@@ -9,3 +9,4 @@ omnicloudmask>=1.7.0
 earthaccess>=0.10.0
 h5py>=3.8.0
 pyhdf>=0.11.4
+paramiko>=3.4.0

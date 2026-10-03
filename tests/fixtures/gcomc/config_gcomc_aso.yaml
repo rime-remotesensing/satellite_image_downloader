@@ -1,0 +1,12 @@
+# Test-only config for the GCOM-C/SGLI RSRF pipeline (does not touch config/config.yaml).
+# Run inside the "gcomc" compose service so that /gcomc_data (raw archive) and the
+# read-only G-Portal key mount are available:
+#   docker compose --env-file key.env --profile gcomc run --rm gcomc \
+#     python3 run.py --config tests/fixtures/gcomc/config_gcomc_aso.yaml
+geojson: ./config/no5.geojson
+startday: [20240315, 20240408]
+endday:   [20240315, 20240410]
+satellite:
+  - gcomc
+activefire: none
+output: /gcomc_data/pipeline_e2e/output
