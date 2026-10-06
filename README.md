@@ -10,7 +10,7 @@
 - **雪マスク**: NDSI ベースの雪マスク（オプション、Sentinel-2/Landsat）
 - **同日コンポジット**: 同日の複数シーンを最小値合成で1枚に統合
 - **MODIS/VIIRS Surface Reflectance**: NASA Earthdata から native Sinusoidal グリッドのまま直接ダウンロード（再投影・リサンプリング・雲マスクなし、NASA公式QAを保持）
-- **VIIRS L2 swath（既定）**: VIIRS は既定で VNP09 / VJ109 / VJ209 の 6-minute L2 swath を使い、I バンドは fixed 375-m analysis grid、M バンドは fixed 750-m analysis grid（UTM 52N、研究対象地域用）へ nearest-neighbour で配置（nominal 375-m / 750-m VIIRS observations mapped to a fixed analysis grid。750 m → 375 m の upsample はせず、375 m は grid 間隔で実効分解能ではない）。overpass ごとの出力と、そこから選んだ日次 best observation を保存。旧 Daily L2G（VNP09GA ほか）は `surface_reflectance.viirs_product: daily_l2g_legacy` で利用可能（[設定リファレンス](docs/configuration.md#viirs-l2-swathvnp09--vj109--vj209-固定-375-m--750-m-grid)）
+- **VIIRS L2 swath（既定）**: VIIRS は既定で VNP09 / VJ109 / VJ209 の 6-minute L2 swath を使い、I バンドは fixed 375-m analysis grid、M バンドは fixed 750-m analysis grid（MODIS Land と同じ等積 Sinusoidal CRS 上の独自 375 m / 750 m grid。750 m の 1 cell = 375 m の 2×2 cell）へ、地表距離による nearest-neighbour で配置（nominal 375-m / 750-m VIIRS L2 observations mapped to fixed equal-area Sinusoidal analysis grids。raw swath + geolocation が正本で、raster は解析 product。750 m → 375 m の upsample はせず、375 m は grid 間隔で実効分解能ではない）。overpass ごとの出力と、そこから選んだ日次 best observation を保存。旧 Daily L2G（VNP09GA ほか）は `surface_reflectance.viirs_product: daily_l2g_legacy` で利用可能（[設定リファレンス](docs/configuration.md#viirs-l2-swathvnp09--vj109--vj209-固定-375-m--750-m-grid)）
 - **GCOM-C/SGLI RSRF**: JAXA G-Portal（公開鍵認証の SFTP）から Level-2 LAND RSRF（version 3002、日次・descending）を取得。native 250 m（VN01–VN11, SW03）と native 1 km（SW01, SW02, SW04）を別グリッドのまま保存し、1 km → 250 m の upsample や super-resolution は行わない。SW02 は公式定義上 **TOA reflectance**（他の SW バンドは surface reflectance）
 - **熱異常（アクティブファイア）データ**: FIRMS MODIS/VIIRS の熱異常検知を point data（Shapefile）として取得（`activefire: SP`/`NRT`）
 - **GPU 対応**: CUDA GPU があれば omnicloudmask の推論を高速化
@@ -337,7 +337,7 @@ output/
 └── viirs/
     ├── surface_reflectance/
     │   └── snpp/               # noaa20/, noaa21/ も同じ構成
-    │       ├── l2_swath/       # 既定: VNP09 (L2 swath) を固定 UTM 52N grid へ配置
+    │       ├── l2_swath/       # 既定: VNP09 (L2 swath) を固定 Sinusoidal 375/750 m grid へ配置
     │       │   ├── overpass/   # overpass ごと: 375m/(I1-I3) 750m/(M bands) qa/ geometry/ provenance/
     │       │   ├── daily/      # 日次 best observation（overpass 出力からの派生物）
     │       │   └── summary/    # 日ごとの overpass・AOI 状態（JSON）

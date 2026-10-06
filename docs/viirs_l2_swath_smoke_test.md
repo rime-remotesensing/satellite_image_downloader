@@ -377,3 +377,57 @@ SR は CMR 検索から、geolocation は SR の `InputPointer` に記録され�
 - 単体テスト（`tests/test_viirs_l2.py`、ネットワーク遮断）: 18 件
 - 実データ統合テスト（`tests/test_viirs_l2_integration.py`、`VIIRS_L2_RAW_DIR` 指定時のみ、ネットワーク遮断）: 8 件
   （granule 境界の mosaic、swath 外、雲、複数 overpass と日次の一貫性、GA との比較 4 ケース）
+
+## 12. Sinusoidal analysis grid への変更と UTM 版との比較監査（2026-10-06）
+
+### 12.1 変更内容
+
+- **既定 grid**: 既定を `VIIRS_SINUSOIDAL_GRID` に変更しました。MODIS Land と同じ CRS（`MODIS_SINUSOIDAL_PROJ4`、R = 6,371,007.181 m）と同じ anchor（`MODIS_SINUSOIDAL_X_MIN` / `_Y_MAX`）を使います。
+  - セルは独自の 375 m / 750 m で、NASA の L2G 500 m / 1 km grid ではありません。
+  - 750 m の辺は 375 m の辺と定義上一致します。テストでは、辺の座標が `X0 + k×cell` と bit 単位で等しいことを assert しています。
+- **UTM grid**: `KYUSHU_UTM52N_GRID` は診断用として残しました。Phase 0 の窓が再現されることをテストで確認しています。
+- **最近傍判定**:
+  - grid の cell 中心は lon/lat へ逆投影し、source の lon/lat とともに WGS84 楕円体上の 3 次元直交座標へ変換して `cKDTree` で最近傍を求めます。弦長は地表距離へ換算します。
+  - `source_distance_m` と footprint 半対角も地表距離です。
+  - 地表距離は `pyproj.Geod`（WGS84）の測地線距離と 1 mm 以内で一致することをテストで確認しています。
+  - 阿蘇では Sinusoidal 平面の距離で近傍の順序が入れ替わる例が実在し、地表距離の最近傍が選ばれることもテストしています。
+
+### 12.2 監査の方法
+
+- **比較対象**: HEAD のコード（UTM 52N、平面距離の最近傍）と新しいコードを、同じ raw キャッシュ・同じ AOI で実行しました。
+  - 対象は Phase 0 / 統合テストの 4 ケース（granule 境界、雲、複数 overpass、単一 overpass）です。
+  - さらに沿岸 AOI（130.45–130.75°E, 32.70–32.95°N）を SNPP と NOAA-21 で追加しました。
+- **比較点**: grid が異なるため、地上の同じ点（AOI 内の 0.001° 格子、4.4 万〜7.5 万点）で、それぞれの grid の該当 cell を比べました。
+- **保存先**: スクリプトと結果は raw アーカイブ側の `sinu_audit/`（`run_cases.py`、`compare.py`、`comparison_report.json`）に保存しています。
+
+### 12.3 結果
+
+| 項目 | UTM（HEAD） | Sinusoidal（新） | 判定 |
+|---|---|---|---|
+| overpass ごとの AOI 内 未 mapped cell（375 m） | 0–8 / 約 3,240 | 0–1 / 約 3,260 | 欠落増加なし。単一 cell の欠測による OBSERVED / PARTIAL の入れ替わりは両方向に発生 |
+| 窓全体の mapped 率 | 0.9984–1.0 | 0.9990–1.0 | 同等 |
+| `source_distance_m` の中央値（375 m） | 169–248 m | 171–250 m | 同等（差 ≤ 5 m） |
+| cell 中心 → 選ばれた source の平均ずれ（東, 北） | 最大 7 m | 最大 4 m | 系統的な画素ずれなし |
+| 同じ地上点で選ばれた source 画素の間隔（平均） | — | 約 250 m（375 m）/ 約 510 m（750 m） | grid の格子位置が異なることによる隣接画素の差。中央値は 0〜330 m |
+| 同じ地上点の反射率の差（中央値） | — | 0〜0.005 | 隣接画素の差の範囲 |
+| 日次の採用 orbit の一致 | — | 96.3–100% | 同等 |
+| 日次の雲信頼度（QF1）の一致 | — | 97.6–100% | 同等 |
+| land_water_mask と Copernicus DEM の陸海一致（沿岸） | 98.1–98.2% | 98.6% | 最良一致となるずれは両方 ±1 cell 以内 |
+| GA との orbit 一致（AOI 内の同じ地上点） | 94.7% / 82.5% / 87.1% / 100% | 94.7% / 82.5% / 86.3% / 100% | 実質同一 |
+
+### 12.4 統合テストの修正
+
+- **granule 境界の mosaic テスト**: 窓に依存して失敗していたため、窓を広げました。
+  - Sinusoidal の窓は阿蘇の経度で剪断するため、地上での形が UTM の窓と異なります（3,498 → 4,992 cell）。
+  - UTM の窓では、0512 granule は窓の南端の帯（緯度 ≤ 32.856°）に 96 cell を与えていただけでした。
+  - テストの目的である granule 境界をどの CRS でも窓に含めるよう、halo を 20 km にしました。
+- **GA との比較テスト**: 窓全体の cell で一致率を計算していたため、Sinusoidal では窓の外縁を含んで 82.5% となっていました。
+  - Phase 0 の UTM 窓の 750 m cell 中心という固定の地上点で評価するよう変更しました。基準の 85% は変えていません。
+  - 処理窓は、この固定領域（lon/lat の多角形）を既定 grid 上で外側へスナップして作ります。
+    halo だけでは、剪断のため固定領域の角が窓からはみ出すためです。
+  - 同じ固定領域での一致率は、UTM / Sinusoidal で次のとおりです。
+    - multi 0.8988 / 0.8988
+    - cloudy 0.8911 / 0.8908
+    - single 1.0 / 1.0
+    - boundary 0.9523 / 0.9523
+- **2:1 の一致**: 全ケースの overpass・daily について、`coarse × 2 == fine` と 750 m / 375 m の辺の差が 0 であることを assert しています。

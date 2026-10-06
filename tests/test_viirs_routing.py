@@ -98,4 +98,4 @@ def test_grid_definition_is_replaceable():
     w = viirs_l2.grid_window_for_geometry(aoi, grid=g)
     assert w.grid is g and w.x0 % 750 == 0 and w.y1 % 750 == 0
     assert viirs_l2.grid_window_for_geometry(aoi).grid is viirs_l2.DEFAULT_ANALYSIS_GRID
-    assert viirs_l2.DEFAULT_ANALYSIS_GRID.crs == "EPSG:32652"
+    assert viirs_l2.DEFAULT_ANALYSIS_GRID is viirs_l2.VIIRS_SINUSOIDAL_GRID and viirs_l2.KYUSHU_UTM52N_GRID.crs == "EPSG:32652"

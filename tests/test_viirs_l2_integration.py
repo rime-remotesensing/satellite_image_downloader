@@ -51,12 +51,23 @@ class NoNet:
 
 
 WINDOW = v.grid_window_for_geometry(ASO)
+# The 0512/0518 granule boundary lies ~10-20 km south of the AOI; a wider halo keeps it inside the window on any grid CRS.
+WINDOW_WIDE = v.grid_window_for_geometry(ASO, halo_m=20000.0)
+# Fixed ground domain for the GA comparison, independent of the product grid: the 750 m cell centres of the Phase 0
+# audit window (UTM 52N diagnostic grid) as lon/lat points.
+_P0 = v.grid_window_for_geometry(ASO, grid=v.KYUSHU_UTM52N_GRID)
+GA_LON, GA_LAT = (np.asarray(a) for a in Transformer.from_crs(_P0.grid.crs, "EPSG:4326", always_xy=True).transform(*_P0.centres("750m")))
+_P0_RING = Transformer.from_crs(_P0.grid.crs, "EPSG:4326", always_xy=True).transform(
+    [_P0.x0, _P0.x1, _P0.x1, _P0.x0, _P0.x0], [_P0.y0, _P0.y0, _P0.y1, _P0.y1, _P0.y0])
+# processing window that contains the whole fixed GA domain on the product grid (snapped outward, no halo)
+WINDOW_GA = v.grid_window_for_geometry({"type": "Polygon", "coordinates": [list(zip(*_P0_RING))]}, halo_m=0.0)
 
 
-def _run(case, tmp_path, patterns=None):
+def _run(case, tmp_path, patterns=None, window=None):
     platform, d, pats = NEEDED[case]
     srs = _srs(platform, d, patterns or pats)
-    return v.process_platform_day(v.PLATFORMS[platform], d, [(Path(s).name, "", "DAY") for s in srs], RAW, NoNet(), ASO, WINDOW, tmp_path)
+    return v.process_platform_day(v.PLATFORMS[platform], d, [(Path(s).name, "", "DAY") for s in srs], RAW, NoNet(), ASO,
+                                  window or WINDOW, tmp_path)
 
 
 def _base(tmp_path, platform):
@@ -69,19 +80,30 @@ def _read(path):
         return r.read(), r.read_masks(1) > 0, r.transform, r.crs, r.descriptions, r.tags()
 
 
-def _alignment(tmp_path, platform, sub):
+def _alignment(tmp_path, platform, sub, window=None):
+    """375/750 m products: same CRS (the grid CRS), same anchor-aligned origin, exact 2:1 shapes and cell edges."""
+    w = window or WINDOW
+    from pyproj import CRS as PCRS
     i375 = next((_base(tmp_path, platform) / sub / "375m").glob("*_375m.tif"))
     m750 = next((_base(tmp_path, platform) / sub / "750m").glob("*_750m.tif"))
     a3, _, t3, c3, _, _ = _read(i375)
     a7, _, t7, c7, _, _ = _read(m750)
-    assert c3.to_epsg() == c7.to_epsg() == 32652
-    assert (t3.c, t3.f) == (t7.c, t7.f) == (WINDOW.x0, WINDOW.y1)
-    assert t3.a == 375.0 and t7.a == 750.0 and a3.shape[1:] == (2 * a7.shape[1], 2 * a7.shape[2])
-    assert t3.c % 750 == 0 and t3.f % 750 == 0
+    grid = PCRS.from_user_input(w.grid.crs)
+    assert PCRS.from_user_input(c3.to_wkt()).equals(grid) and PCRS.from_user_input(c7.to_wkt()).equals(grid)
+    assert (t3.c, t3.f) == (t7.c, t7.f) == (w.x0, w.y1)
+    assert t3.a == 375.0 and t7.a == 750.0 and t3.e == -375.0 and t7.e == -750.0
+    ny7, nx7 = a7.shape[1:]
+    assert a3.shape[1:] == (2 * ny7, 2 * nx7)                                   # coarse x 2 == fine
+    for edge, origin in ((t7.c, w.grid.origin_e), (t7.f, w.grid.origin_n)):
+        k = round((edge - origin) / 750.0)
+        assert edge == origin + k * 750.0                                        # anchored to the global grid origin
+    j, i = np.arange(nx7 + 1), np.arange(ny7 + 1)
+    assert np.array_equal(t7.c + j * t7.a, t3.c + (2 * j) * t3.a)                # every 750 m edge == a 375 m edge (diff 0)
+    assert np.array_equal(t7.f + i * t7.e, t3.f + (2 * i) * t3.e)
 
 
 def test_granule_boundary_same_orbit_mosaic(tmp_path):
-    s = _run("boundary", tmp_path)
+    s = _run("boundary", tmp_path, window=WINDOW_WIDE)
     obs = [o for o in s["overpasses"] if o["aoi_status"] != "AOI_OUTSIDE_SWATH"]
     two = [o for o in obs if len(o["granules"]) == 2]
     assert two, "expected one overpass built from both 0512 and 0518"
@@ -93,7 +115,7 @@ def test_granule_boundary_same_orbit_mosaic(tmp_path):
     assert o["stats"]["375m"]["bowtie_excluded"] > 0 and o["stats"]["375m"]["invalid_geolocation_excluded"] == 0
     # source_distance_m is recorded everywhere; at this swath-edge overpass (sensor zenith ~67 deg) footprints are large
     assert np.all(np.isfinite(a[4][m])) and np.nanmedian(a[4][m]) < 400 and np.nanmax(a[4][m]) < 1000
-    _alignment(tmp_path, "noaa20", "overpass")
+    _alignment(tmp_path, "noaa20", "overpass", WINDOW_WIDE)
 
 
 def test_granule_outside_aoi_is_reported_not_written(tmp_path):
@@ -134,14 +156,13 @@ def test_multiple_overpasses_daily_selection_consistency(tmp_path):
     _alignment(tmp_path, "noaa21", "daily")
 
 
-def _ga_values(platform_ga, d, X, Y):
-    """GA 1 km first layer sampled at our 750 m cell centres (comparison only)."""
-    lon, lat = Transformer.from_crs("EPSG:32652", "EPSG:4326", always_xy=True).transform(X, Y)
+def _ga_values(platform_ga, d, lon, lat):
+    """GA 1 km first layer sampled at the given lon/lat points (comparison only)."""
     xs, ys = Transformer.from_crs("EPSG:4326", "+proj=sinu +lon_0=0 +R=6371007.181 +units=m +no_defs", always_xy=True).transform(lon, lat)
     TS = 20015109.354 * 2 / 36
     H = np.floor((xs + 20015109.354) / TS).astype(int)
     V = np.floor((10007554.677 - ys) / TS).astype(int)
-    out = {k: np.full(X.shape, np.nan) for k in ("orbit", "szen")}
+    out = {k: np.full(lon.shape, np.nan) for k in ("orbit", "szen")}
     for p in glob.glob(str(RAW / platform_ga / f"{d:%Y}" / f"{d.timetuple().tm_yday:03d}" / "*.h5")):
         hh, vv = int(p.split(".h")[1][:2]), int(p.split(".h")[1][3:5])
         m = (H == hh) & (V == vv)
@@ -166,13 +187,23 @@ def test_legacy_ga_orbit_and_geometry_consistency(tmp_path, case, ga):
     platform, d, _ = NEEDED[case]
     if not glob.glob(str(RAW / ga / f"{d:%Y}" / f"{d.timetuple().tm_yday:03d}" / "*.h5")):
         pytest.skip(f"{ga} {d} not in the raw archive")
-    _run(case, tmp_path, patterns=[f"{v.PLATFORMS[platform].sr}.A{d:%Y}{d.timetuple().tm_yday:03d}.*"])   # all daytime granules of the day
-    p7, m7, *_ = _read(next((_base(tmp_path, platform) / "daily" / "provenance").glob("*_provenance_750m.tif")))
-    g7, _, *_ = _read(next((_base(tmp_path, platform) / "daily" / "geometry").glob("*_geometry_750m.tif")))
-    X, Y = WINDOW.centres("750m")
-    gav = _ga_values(ga, d, X, Y)
+    _run(case, tmp_path, patterns=[f"{v.PLATFORMS[platform].sr}.A{d:%Y}{d.timetuple().tm_yday:03d}.*"],   # all daytime granules
+         window=WINDOW_GA)                                                         # contains the fixed GA domain
+    _alignment(tmp_path, platform, "daily", WINDOW_GA)                            # exact 375/750 nesting for every case
+    for ov375 in (_base(tmp_path, platform) / "overpass" / "375m").glob("*_375m.tif"):
+        stem = ov375.name[: -len("_375m.tif")]
+        a3, _, t3, *_ = _read(ov375)
+        a7, _, t7, *_ = _read(_base(tmp_path, platform) / "overpass" / "750m" / f"{stem}_750m.tif")
+        assert (t3.c, t3.f) == (t7.c, t7.f) and a3.shape[1:] == (2 * a7.shape[1], 2 * a7.shape[2])
+    P, M, T, C, *_ = _read(next((_base(tmp_path, platform) / "daily" / "provenance").glob("*_provenance_750m.tif")))
+    G, *_ = _read(next((_base(tmp_path, platform) / "daily" / "geometry").glob("*_geometry_750m.tif")))
+    x, y = (np.asarray(a) for a in Transformer.from_crs("EPSG:4326", C.to_wkt(), always_xy=True).transform(GA_LON, GA_LAT))
+    col, row = np.floor((x - T.c) / T.a).astype(int), np.floor((y - T.f) / T.e).astype(int)
+    assert row.min() >= 0 and col.min() >= 0 and row.max() < M.shape[0] and col.max() < M.shape[1]   # domain inside window
+    sel, szen, m7 = P[5][row, col], G[0][row, col], M[row, col]
+    gav = _ga_values(ga, d, GA_LON, GA_LAT)
     ok = m7 & np.isfinite(gav["orbit"])
-    agree = float(np.mean(p7[5][ok] == gav["orbit"][ok]))
-    same = ok & (p7[5] == gav["orbit"])
+    agree = float(np.mean(sel[ok] == gav["orbit"][ok]))
+    same = ok & (sel == gav["orbit"])
     assert agree >= 0.85, agree                                         # mostly the same overpass as NASA's L2G
-    assert np.nanmedian(np.abs(g7[0][same] - gav["szen"][same])) < 0.5  # and the same view geometry there
+    assert np.nanmedian(np.abs(szen[same] - gav["szen"][same])) < 0.5   # and the same view geometry there
