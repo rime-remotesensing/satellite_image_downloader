@@ -1,8 +1,12 @@
-"""VIIRS L2 swath Surface Reflectance (VNP09 / VJ109 / VJ209) -> fixed UTM 375 m / 750 m analysis grids.
+"""VIIRS L2 swath Surface Reflectance (VNP09 / VJ109 / VJ209) -> fixed equal-area Sinusoidal 375 m / 750 m analysis grids.
 
-Output = nominal 375-m / 750-m VIIRS L2 observations mapped to a fixed 375-m / 750-m analysis grid.
+Output = nominal 375-m / 750-m VIIRS L2 observations mapped to fixed equal-area Sinusoidal analysis grids
+(the MODIS Land Sinusoidal CRS, but our own 375 m / 750 m cells -- not the NASA 500 m / 1 km L2G grids).
+The raw swath + IMG/MOD geolocation is the native authority; the gridded rasters are analysis products.
 375 m / 750 m are analysis-grid spacings, not effective resolutions (source footprints at Aso are ~423-800 m for I bands).
-The swath -> grid step is a re-gridding (nearest neighbour), not a resampling-free copy.
+The swath -> grid step is a re-gridding (nearest neighbour), not a resampling-free copy. Nearest-neighbour
+selection and source_distance_m use distances on the WGS84 surface, not Sinusoidal plane distances
+(Sinusoidal is equal-area but does not preserve distances or angles).
 I bands stay on the 375 m grid and M bands on the 750 m grid; nothing is up- or down-sampled
 between them (the 750 -> 375 broadcast belongs to the later deep-learning preprocessing).
 
@@ -32,6 +36,7 @@ from rasterio.features import bounds as geometry_bounds, geometry_mask
 from rasterio.transform import Affine
 
 from .config import _resolve_runtime_path
+from .constants import MODIS_SINUSOIDAL_PROJ4, MODIS_SINUSOIDAL_X_MIN, MODIS_SINUSOIDAL_Y_MAX
 from .network_retry import call_with_network_retry
 
 LOGGER = logging.getLogger(__name__)
@@ -53,13 +58,23 @@ class AnalysisGridDefinition:
     snap_m: float            # AOI windows snap outward to this (the coarse cell) -> identical 375/750 extents
 
 
-# Analysis grid for the current study area (Aso, Kyushu; all regions lie in UTM zone 52).
-# This is NOT a global rule: another region needs its own definition (e.g. a different UTM zone).
+# Default: global equal-area Sinusoidal 375 m / 750 m grid. CRS and anchor are the MODIS Land Sinusoidal
+# definition in constants.py (sphere R = 6371007.181 m; anchor = upper-left corner of the MODIS tile grid),
+# but the cells are new 375 m / 750 m cells (edges X0 + n*375 / X0 + n*750, Y0 - m*375 / Y0 - m*750), so every
+# 750 m cell is exactly 2 x 2 375 m cells. The MODIS 500 m / 1 km pixel grids are NOT reused.
+VIIRS_SINUSOIDAL_GRID = AnalysisGridDefinition(
+    name="viirs_sinusoidal_375_750", crs=MODIS_SINUSOIDAL_PROJ4,
+    origin_e=MODIS_SINUSOIDAL_X_MIN, origin_n=MODIS_SINUSOIDAL_Y_MAX,
+    cell_m={"375m": 375.0, "750m": 750.0}, snap_m=750.0,
+)
+# Diagnostic / regression only (Phase 0 comparison): UTM zone 52 grid anchored at E=0, N=0. Not a global rule.
 KYUSHU_UTM52N_GRID = AnalysisGridDefinition(
     name="kyushu_utm52n_375_750", crs="EPSG:32652", origin_e=0.0, origin_n=0.0,
     cell_m={"375m": 375.0, "750m": 750.0}, snap_m=750.0,
 )
-DEFAULT_ANALYSIS_GRID = KYUSHU_UTM52N_GRID
+DEFAULT_ANALYSIS_GRID = VIIRS_SINUSOIDAL_GRID
+DESCRIPTION = ("nominal 375-m / 750-m VIIRS L2 observations mapped to fixed equal-area Sinusoidal analysis grids "
+               "(raw swath + geolocation is the native authority; these rasters are analysis products)")
 # Back-compatible aliases of the default definition.
 GRID_CRS = DEFAULT_ANALYSIS_GRID.crs
 GRID_ORIGIN_E = DEFAULT_ANALYSIS_GRID.origin_e
@@ -97,6 +112,34 @@ def _grid_transformer(crs: str = DEFAULT_ANALYSIS_GRID.crs, inverse: bool = Fals
     from pyproj import Transformer
     return Transformer.from_crs(crs, "EPSG:4326", always_xy=True) if inverse else \
         Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+
+
+# ---------------------------------------------------------------------------
+# Distances on the WGS84 surface (used for NN selection, source_distance_m and footprint size)
+# ---------------------------------------------------------------------------
+
+WGS84_A = 6378137.0
+WGS84_F = 1.0 / 298.257223563
+_WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
+MEAN_EARTH_RADIUS_M = 6371008.8   # IUGG mean radius, only to turn short chords into arc lengths
+
+
+def lonlat_to_ecef(lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+    """Earth-centred Cartesian coordinates [m] of WGS84 lon/lat points on the ellipsoid (height 0), shape (n, 3)."""
+    lo, la = np.radians(np.asarray(lon, np.float64)), np.radians(np.asarray(lat, np.float64))
+    s = np.sin(la)
+    n = WGS84_A / np.sqrt(1.0 - _WGS84_E2 * s * s)
+    return np.stack([n * np.cos(la) * np.cos(lo), n * np.cos(la) * np.sin(lo), n * (1.0 - _WGS84_E2) * s], axis=-1)
+
+
+def chord_to_surface_m(chord: np.ndarray) -> np.ndarray:
+    """Surface distance from a 3-D chord. For the < 10 km distances used here the chord on the WGS84 ellipsoid
+    differs from the geodesic by far less than 1 mm; the arc correction is applied for completeness."""
+    return 2.0 * MEAN_EARTH_RADIUS_M * np.arcsin(np.minimum(np.asarray(chord, np.float64) / (2.0 * MEAN_EARTH_RADIUS_M), 1.0))
+
+
+def surface_distance_m(lon1, lat1, lon2, lat2) -> np.ndarray:
+    return chord_to_surface_m(np.linalg.norm(lonlat_to_ecef(lon1, lat1) - lonlat_to_ecef(lon2, lat2), axis=-1))
 
 
 def grid_window_for_geometry(geometry_wgs84: Dict[str, Any], halo_m: float = 10000.0,
@@ -377,9 +420,9 @@ def bowtie_zone(rows: int, res: str) -> np.ndarray:
 
 @dataclass
 class Sources:
-    x: np.ndarray
-    y: np.ndarray
-    half_diag: np.ndarray
+    lon: np.ndarray        # source pixel centre (terrain-corrected IMG/MOD geolocation), WGS84 degrees
+    lat: np.ndarray
+    half_diag: np.ndarray  # half the local footprint diagonal on the WGS84 surface [m]
     granule: np.ndarray
     row: np.ndarray
     col: np.ndarray
@@ -389,9 +432,8 @@ class Sources:
     n_invalid_geo_excluded: int = 0
 
 
-def extract_sources(pg: PairedGranule, granule_index: int, res: str, lonlat_box: Tuple[float, float, float, float],
-                    crs: str = DEFAULT_ANALYSIS_GRID.crs) -> Sources:
-    """Source pixels of one granule inside a lon/lat box, projected to the fixed grid CRS.
+def extract_sources(pg: PairedGranule, granule_index: int, res: str, lonlat_box: Tuple[float, float, float, float]) -> Sources:
+    """Source pixels of one granule inside a lon/lat box (geolocation kept as lon/lat; no projection).
     Bow-tie-deleted pixels and pixels without valid geolocation are excluded; other SR fill is kept as fill."""
     from pyhdf.SD import SD, SDC
     bands = I_BANDS if res == "375m" else M_BANDS
@@ -416,28 +458,28 @@ def extract_sources(pg: PairedGranule, granule_index: int, res: str, lonlat_box:
     near = (lon >= w) & (lon <= e) & (lat >= s) & (lat <= n)
     keep = near & ~deleted & ~bad_geo
     r, c = np.nonzero(keep)
-    tf = _grid_transformer(crs)
-    x, y = tf.transform(lon[r, c].astype(np.float64), lat[r, c].astype(np.float64))
+    slon, slat = lon[r, c].astype(np.float64), lat[r, c].astype(np.float64)
     # neighbour for the local footprint size: next pixel, or the previous one on the last row/column of the granule
-    # (a clipped "next" pixel would be the pixel itself and collapse the footprint at granule boundaries)
+    # (a clipped "next" pixel would be the pixel itself and collapse the footprint at granule boundaries).
+    # Pixel spacings are surface distances between neighbouring geolocation points, not projected distances.
     r1 = np.where(r + 1 < rows_n, r + 1, r - 1)
     c1 = np.where(c + 1 < lat.shape[1], c + 1, c - 1)
-    xa, ya = tf.transform(lon[r, c1].astype(np.float64), lat[r, c1].astype(np.float64))
-    xt, yt = tf.transform(lon[r1, c].astype(np.float64), lat[r1, c].astype(np.float64))
-    half_diag = 0.5 * np.hypot(np.hypot(xa - x, ya - y), np.hypot(xt - x, yt - y))
+    d_scan = surface_distance_m(slon, slat, lon[r, c1].astype(np.float64), lat[r, c1].astype(np.float64))
+    d_track = surface_distance_m(slon, slat, lon[r1, c].astype(np.float64), lat[r1, c].astype(np.float64))
+    half_diag = 0.5 * np.hypot(d_scan, d_track)
     scan_idx = np.minimum(r // ROWS_PER_SCAN[res], len(st) - 1)
     t_unix = TAI93_UNIX + st[scan_idx] - pg.leapseconds
     data = {f"sr_{b}": sr[b][r, c] for b in bands}
     data.update({f"qa_{k}": v[r, c] for k, v in qa.items()})
     data.update({f"geom_{k}": geom[k][r, c] for k in GEOMETRY})
     data["geo_land_water_mask"] = geo_lwm[r, c]
-    return Sources(x, y, half_diag, np.full(len(r), granule_index, np.int32), r.astype(np.int32), c.astype(np.int32), t_unix,
+    return Sources(slon, slat, half_diag, np.full(len(r), granule_index, np.int32), r.astype(np.int32), c.astype(np.int32), t_unix,
                    data, int((near & deleted).sum()), int((near & bad_geo & ~deleted).sum()))
 
 
 def concat_sources(parts: Sequence[Sources]) -> Sources:
     keys = parts[0].data.keys()
-    return Sources(*(np.concatenate([getattr(p, a) for p in parts]) for a in ("x", "y", "half_diag", "granule", "row", "col", "time_unix")),
+    return Sources(*(np.concatenate([getattr(p, a) for p in parts]) for a in ("lon", "lat", "half_diag", "granule", "row", "col", "time_unix")),
                    data={k: np.concatenate([p.data[k] for p in parts]) for k in keys},
                    n_bowtie_excluded=sum(p.n_bowtie_excluded for p in parts),
                    n_invalid_geo_excluded=sum(p.n_invalid_geo_excluded for p in parts))
@@ -447,21 +489,31 @@ def concat_sources(parts: Sequence[Sources]) -> Sources:
 class Mapping:
     res: str
     src: np.ndarray        # (ny, nx) index into Sources, -1 = no observation (outside swath / beyond footprint)
-    dist: np.ndarray       # source-to-target-centre distance [m], NaN where unmapped
+    dist: np.ndarray       # source-to-target-centre distance on the WGS84 surface [m], NaN where unmapped
     ties_resolved: int
 
 
-def nn_map(src: Sources, window: GridWindow, res: str) -> Mapping:
-    """Nearest source centre for each target cell centre; accepted only within half the local footprint diagonal.
-    Exact distance ties -> lower sensor zenith -> earlier scan time -> lower granule/row/col index (deterministic)."""
-    from scipy.spatial import cKDTree
+def target_lonlat(window: GridWindow, res: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Grid cell centres back-projected from the grid CRS to WGS84 lon/lat."""
     X, Y = window.centres(res)
-    shape = X.shape
-    if len(src.x) == 0:
+    lon, lat = _grid_transformer(window.grid.crs, inverse=True).transform(X, Y)
+    return np.asarray(lon, np.float64), np.asarray(lat, np.float64)
+
+
+def nn_map(src: Sources, window: GridWindow, res: str) -> Mapping:
+    """Nearest source centre for each target cell centre by distance on the WGS84 surface (not grid-plane distance):
+    target centres are back-projected to lon/lat, both sides go to Earth-centred 3-D coordinates, a cKDTree finds the
+    nearest chord, and the chord is converted to a surface distance. Accepted only within half the local footprint
+    diagonal. Exact distance ties -> lower sensor zenith -> earlier scan time -> lower granule/row/col (deterministic)."""
+    from scipy.spatial import cKDTree
+    tlon, tlat = target_lonlat(window, res)
+    shape = tlon.shape
+    if len(src.lon) == 0:
         return Mapping(res, np.full(shape, -1, np.int64), np.full(shape, np.nan), 0)
-    tree = cKDTree(np.c_[src.x, src.y])
-    k = min(2, len(src.x))
-    dist, idx = tree.query(np.c_[X.ravel(), Y.ravel()], k=k)
+    tree = cKDTree(lonlat_to_ecef(src.lon, src.lat))
+    k = min(2, len(src.lon))
+    chord, idx = tree.query(lonlat_to_ecef(tlon.ravel(), tlat.ravel()), k=k)
+    dist = chord_to_surface_m(chord)
     if k == 1:
         dist, idx = dist[:, None], idx[:, None]
     best = idx[:, 0].copy()
@@ -497,7 +549,7 @@ class Overpass:
 
 
 def _sample(src: Sources, m: Mapping, key: str, fill: Any, dtype: Any) -> np.ndarray:
-    if len(src.x) == 0:  # no source pixel near the window (swath elsewhere): every cell is unmapped
+    if len(src.lon) == 0:  # no source pixel near the window (swath elsewhere): every cell is unmapped
         return np.full(m.src.shape, fill, dtype=dtype)
     s = np.maximum(m.src, 0)
     vals = src.data[key][s] if key in src.data else getattr(src, key)[s]
@@ -509,7 +561,7 @@ def build_overpass(platform: str, orbit: int, granules: List[PairedGranule], win
     layers: Dict[str, Dict[str, np.ndarray]] = {}
     stats: Dict[str, Any] = {}
     for res in ("375m", "750m"):
-        src = concat_sources([extract_sources(g, i, res, lonlat_box, window.grid.crs) for i, g in enumerate(granules)])
+        src = concat_sources([extract_sources(g, i, res, lonlat_box) for i, g in enumerate(granules)])
         m = nn_map(src, window, res)
         L: Dict[str, np.ndarray] = {}
         for b in (I_BANDS if res == "375m" else M_BANDS):
@@ -537,7 +589,7 @@ def build_overpass(platform: str, orbit: int, granules: List[PairedGranule], win
         stats[res] = {
             "cells": int(L["mapped"].size), "mapped": int(L["mapped"].sum()), "valid_sr": int(valid.sum()),
             "fill_sr_mapped": int((L["mapped"] & ~np.isfinite(L[band0])).sum()),
-            "sources_in_box": int(len(src.x)), "bowtie_excluded": src.n_bowtie_excluded,
+            "sources_in_box": int(len(src.lon)), "bowtie_excluded": src.n_bowtie_excluded,
             "invalid_geolocation_excluded": src.n_invalid_geo_excluded, "exact_distance_ties": m.ties_resolved,
             "source_distance_m_median_p99_max": [float(np.nanmedian(m.dist)), float(np.nanpercentile(m.dist, 99)), float(np.nanmax(m.dist))] if valid.any() else None,
             "cells_per_used_source_mean": float(cnt.mean()) if cnt.size else None,
@@ -657,7 +709,7 @@ def write_product(out_dir: Path, stem: str, layers: Dict[str, Dict[str, np.ndarr
         t = dict(tags)
         g = window.grid
         t.update(group=group, analysis_grid=res, grid_cell_m=g.cell_m[res], grid_name=g.name,
-                 grid_definition=f"{g.crs}, origin E={g.origin_e} N={g.origin_n}, edges at multiples of {g.cell_m[res]:.0f} m",
+                 grid_definition=f"{g.crs}; anchor x0={g.origin_e} y0={g.origin_n}; cell edges x0 + n*{g.cell_m[res]:.0f}, y0 - m*{g.cell_m[res]:.0f} (375 m and 750 m share the anchor: one 750 m cell = 2 x 2 375 m cells)",
                  scale_applied=(dtype == "float32" and group in ("375m", "750m")),
                  nodata_meaning="dataset mask 0 = no source observation within the footprint (outside swath)")
         if group in ("375m", "750m"):
@@ -799,9 +851,10 @@ def process_platform_day(platform: PlatformProducts, day: date, sr_entries: List
             tags = {"product": platform.sr, "collection": SR_COLLECTION, "platform": platform.key, "orbit": orbit,
                     "acquisition_start_utc": gs[0].sr.start, "acquisition_end_utc": gs[-1].sr.end,
                     "source_granules": [g.sr.path.name for g in gs], "geolocation_granules": [[g.img.name, g.mod.name] for g in gs],
-                    "mapping": "nearest neighbour of source pixel centres (terrain-corrected IMG/MOD geolocation) to fixed-grid cell centres; "
-                               "accepted within half the local source footprint diagonal; bow-tie-deleted pixels excluded; same-orbit granules mosaicked in one KD-tree",
-                    "description": "nominal 375-m / 750-m VIIRS L2 observations mapped to a fixed 375-m / 750-m analysis grid"}
+                    "mapping": "nearest neighbour of source pixel centres (terrain-corrected IMG/MOD geolocation) to fixed-grid cell centres by "
+                               "distance on the WGS84 surface (Earth-centred 3-D KD-tree, not grid-plane distance); accepted within half the "
+                               "local source footprint diagonal (surface distances); bow-tie-deleted pixels excluded; same-orbit granules mosaicked in one KD-tree",
+                    "description": DESCRIPTION}
             rec["files"] = write_product(base / "overpass", stem, ov.layers, window, tags)
             overpasses.append(ov)
         else:

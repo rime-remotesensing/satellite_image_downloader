@@ -228,17 +228,27 @@ surface_reflectance:
   # viirs_product: daily_l2g_legacy        # 旧方式を使う場合のみ明示
 ```
 
-`l2_swath` の出力は「nominal 375-m / 750-m VIIRS L2 observations mapped to a fixed 375-m / 750-m analysis grid」です。
+`l2_swath` の出力は「nominal 375-m / 750-m VIIRS L2 observations mapped to fixed equal-area Sinusoidal analysis grids」です。
+元の swath と IMG/MOD geolocation が native の正本であり、Sinusoidal 上の raster は解析用 product です（native swath geometry をそのまま保存した 375 m raster ではありません）。
 I バンド（I1–I3）は IMG geolocation から fixed 375-m analysis grid へ、M バンド（M1–M5, M7, M8, M10, M11）は MOD geolocation から fixed 750-m analysis grid へ、
 それぞれ独立に nearest-neighbour で配置します。750 m バンドを 375 m へ upsample することはしません
 （モデル入力時に 750 m の 1 cell を対応する 375 m の 2×2 cell へ複製するのは、後段の前処理の役割です）。
 375 m は解析 grid の間隔であり、実効的な空間分解能ではありません。阿蘇では I バンドの実 source footprint が約 423〜800 m（天頂角による）になることを確認しています。
 
-- **固定 grid**: EPSG:32652（UTM zone 52N）。375 m / 750 m とも原点は E = 0, N = 0 で、セルの辺は 375 m / 750 m の整数倍。
-  これは現在の研究対象地域（阿蘇、zone 52 内）用の analysis grid で、他地域へ一般化できる規則ではありません。
-  grid 定義は `src/viirs_l2.py` の `AnalysisGridDefinition`（既定 `KYUSHU_UTM52N_GRID`）として交換可能です
-  AOI の窓は 750 m 単位で外側へスナップするため、750 m の 1 cell は 375 m の 2×2 cell と幾何学的に完全に一致します。
+- **固定 grid（既定 `VIIRS_SINUSOIDAL_GRID`）**: MODIS Land と同じ Sinusoidal CRS（`constants.py` の `MODIS_SINUSOIDAL_PROJ4`、
+  球半径 R = 6371007.181 m）を使い、anchor も MODIS タイルグリッドの原点（`MODIS_SINUSOIDAL_X_MIN`, `MODIS_SINUSOIDAL_Y_MAX`）です。
+  ただしセルは独自の 375 m / 750 m で、NASA の 500 m / 1 km（約 463 m / 926 m）L2G grid は使いません。
+  セルの辺は 375 m が `x = X0 + n×375`, `y = Y0 − m×375`、750 m が `x = X0 + n×750`, `y = Y0 − m×750` で、anchor が共通なので
+  750 m の 1 cell は 375 m の 2×2 cell と定義上完全に一致します（許容誤差で合わせるのではありません）。
+  AOI の窓は 750 m 単位で外側へスナップし、375 m / 750 m で同じ地理範囲になります。全世界で同じ grid で、地域ごとの定義は不要です。
   原点を granule の範囲から計算することはありません（全日付・全 platform で同じ grid）
+- **UTM grid（診断用）**: 以前の既定 `KYUSHU_UTM52N_GRID`（EPSG:32652、原点 E = 0, N = 0）は Phase 0 との比較・回帰確認用に残しています。
+  grid 定義は `src/viirs_l2.py` の `AnalysisGridDefinition` として交換可能です
+- **最近傍の距離**: Sinusoidal は面積を保存しますが距離・角度は保存しない（阿蘇の経度 131° では大きく剪断する）ため、
+  最近傍の判定は Sinusoidal 平面上の距離ではなく地表距離で行います。grid の cell 中心を lon/lat に逆投影し、source の lon/lat とともに
+  WGS84 楕円体上の 3 次元直交座標へ変換して `scipy.spatial.cKDTree` で最近傍を求め、弦長を地表距離に換算します。
+  `source_distance_m` と footprint の局所半対角（隣接 geolocation 画素間の地表距離から計算）も地表距離です。
+  つまり「投影 = 面積保存の Sinusoidal」「観測の選択 = 物理的な地表距離」を分けています
 - **pairing**: L2 SR の `InputPointer` に記録された geolocation（VNP03IMG/MOD, VJ103IMG/MOD, VJ203IMG/MOD）のファイル名をそのまま使い、
   OrbitNumber・開始/終了時刻の一致を確認します（collection 番号の一致では判定しません）
 - **配置**: 画素中心の nearest-neighbour。採用は source 画素の局所的な半対角以内のみ。bow-tie 削除画素は source から除外し、fill を補間しません。

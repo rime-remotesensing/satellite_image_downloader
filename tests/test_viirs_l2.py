@@ -120,11 +120,36 @@ def test_platform_product_mapping():
         "noaa21": ("VJ209", "VJ203IMG", "VJ203MOD")}
 
 
+NO5 = json.loads((Path(__file__).resolve().parents[1] / "config" / "no5.geojson").read_text())["features"][0]["geometry"]
+
+
+def test_default_grid_is_the_modis_sinusoidal_crs():
+    from pyproj import CRS as PCRS
+    from src import constants
+    from src.surface_reflectance import _sinusoidal_crs
+    g = v.DEFAULT_ANALYSIS_GRID
+    assert g is v.VIIRS_SINUSOIDAL_GRID and g.crs is constants.MODIS_SINUSOIDAL_PROJ4          # one authority, no copy
+    assert (g.origin_e, g.origin_n) == (constants.MODIS_SINUSOIDAL_X_MIN, constants.MODIS_SINUSOIDAL_Y_MAX)
+    assert g.cell_m == {"375m": 375.0, "750m": 750.0} and g.snap_m == 750.0                     # not MODIS 463/926 m
+    ours, modis = PCRS.from_user_input(g.crs), PCRS.from_user_input(_sinusoidal_crs().to_wkt())
+    assert ours.equals(modis)
+    e = ours.ellipsoid
+    assert e.semi_major_metre == e.semi_minor_metre == constants.MODIS_SINUSOIDAL_SPHERE_RADIUS_M == 6371007.181
+    assert v.KYUSHU_UTM52N_GRID.crs == "EPSG:32652"                                             # kept for diagnostics
+
+
+def _edge_index(edge, origin, cell):
+    k = round((edge - origin) / cell)
+    assert edge == origin + k * cell                       # bit-exact: the edge IS origin + k * cell
+    return k
+
+
 def test_fixed_grid_origin_and_exact_2to1_alignment():
-    w = v.grid_window_for_geometry(json.loads((Path(__file__).resolve().parents[1] / "config" / "no5.geojson").read_text())["features"][0]["geometry"])
-    assert (w.x0, w.y0, w.x1, w.y1) == (669750.0, 3636000.0, 719250.0, 3675750.0)   # Phase 0 window
-    for val in (w.x0, w.y0, w.x1, w.y1):
-        assert val % 750.0 == 0.0                                                      # anchored to E=0,N=0, 750 m multiples
+    w = v.grid_window_for_geometry(NO5)
+    g = w.grid
+    for val, o in ((w.x0, g.origin_e), (w.x1, g.origin_e), (w.y0, g.origin_n), (w.y1, g.origin_n)):
+        _edge_index(val, o, 750.0)                         # global anchor, 750 m multiples
+        _edge_index(val, o, 375.0)
     (n3y, n3x), (n7y, n7x) = w.shape("375m"), w.shape("750m")
     assert (n3y, n3x) == (2 * n7y, 2 * n7x)
     t3, t7 = w.transform("375m"), w.transform("750m")
@@ -135,6 +160,12 @@ def test_fixed_grid_origin_and_exact_2to1_alignment():
     X7, Y7 = w.centres("750m")
     X3, Y3 = w.centres("375m")
     assert np.array_equal(X7, 0.5 * (X3[::2, ::2] + X3[::2, 1::2])) and np.array_equal(Y7, 0.5 * (Y3[::2, ::2] + Y3[1::2, ::2]))
+
+
+def test_utm_diagnostic_grid_still_reproduces_phase0_window():
+    w = v.grid_window_for_geometry(NO5, grid=v.KYUSHU_UTM52N_GRID)
+    assert (w.x0, w.y0, w.x1, w.y1) == (669750.0, 3636000.0, 719250.0, 3675750.0)   # Phase 0 window
+    assert w.shape("375m") == tuple(2 * n for n in w.shape("750m"))
 
 
 def test_bowtie_zone_matches_audit_counts():
@@ -175,29 +206,87 @@ def test_sr_schema_is_exact(tmp_path):
 
 # ----------------------------------------------------------------- NN mapping
 
-def _src(xs, ys, half, szen=None, t=None):
-    n = len(xs)
-    return v.Sources(np.array(xs, float), np.array(ys, float), np.full(n, half), np.zeros(n, np.int32), np.arange(n, dtype=np.int32),
+GEOD = None
+
+
+def _geod():
+    global GEOD
+    if GEOD is None:
+        from pyproj import Geod
+        GEOD = Geod(ellps="WGS84")
+    return GEOD
+
+
+def _src(lons, lats, half, szen=None, t=None):
+    n = len(lons)
+    return v.Sources(np.array(lons, float), np.array(lats, float), np.full(n, half), np.zeros(n, np.int32), np.arange(n, dtype=np.int32),
                      np.zeros(n, np.int32), np.array(t if t is not None else np.zeros(n), float),
                      data={"geom_sensor_zenith": np.array(szen if szen is not None else np.zeros(n), np.int16)})
 
 
+def _small_window(nx750=2, ny750=1):
+    """A few cells of the default Sinusoidal grid near Aso."""
+    w = v.grid_window_for_geometry({"type": "Point", "coordinates": [131.0, 33.0]}, halo_m=0.0)
+    return v.GridWindow(w.x0, w.y1 - ny750 * 750.0, w.x0 + nx750 * 750.0, w.y1, w.grid)
+
+
+def _from(lon, lat, az, dist):
+    lo, la, _ = _geod().fwd(lon, lat, az, dist)
+    return float(lo), float(la)
+
+
+def test_surface_distance_matches_wgs84_geodesic():
+    for az in (0, 37, 90, 145, 260):
+        for d in (10.0, 300.0, 1500.0):
+            lo, la = _from(131.0, 33.0, az, d)
+            assert float(v.surface_distance_m(131.0, 33.0, lo, la)) == pytest.approx(d, abs=1e-3)
+
+
 def test_nn_picks_nearest_and_respects_footprint_limit():
-    w = v.GridWindow(0.0, 0.0, 1500.0, 750.0)        # 375 m grid: 2 x 4 cells
-    s = _src([187.5 + 50, 187.5 + 375 + 10, 1300.0], [562.5, 562.5, 100.0], half=300.0)
+    w = _small_window(nx750=2, ny750=1)                 # 375 m grid: 2 x 4 cells
+    tlon, tlat = v.target_lonlat(w, "375m")
+    s = _src(*zip(_from(tlon[0, 0], tlat[0, 0], 90, 50.0), _from(tlon[0, 1], tlat[0, 1], 0, 10.0),
+                  _from(tlon[1, 3], tlat[1, 3], 200, 20.0)), half=300.0)
     m = v.nn_map(s, w, "375m")
-    assert m.src[0, 0] == 0 and m.src[0, 1] == 1                      # nearest of several sources
-    assert m.dist[0, 0] == pytest.approx(50.0)
-    assert m.src[0, 3] == -1 or m.dist[0, 3] <= 300.0                   # beyond the footprint -> unmapped
-    assert m.src[1, 3] == 2
+    assert m.src[0, 0] == 0 and m.src[0, 1] == 1 and m.src[1, 3] == 2           # nearest of several sources
+    assert m.dist[0, 0] == pytest.approx(50.0, abs=1e-3)                          # source_distance_m = surface distance
+    assert m.src[0, 3] == -1 or m.dist[0, 3] <= 300.0                             # beyond the footprint -> unmapped
+    far = v.nn_map(_src(*zip(_from(tlon[0, 0], tlat[0, 0], 90, 400.0)), half=300.0), w, "375m")
+    assert far.src[0, 0] == -1 and np.isnan(far.dist[0, 0])
+
+
+def test_nn_uses_surface_distance_not_sinusoidal_plane_distance():
+    """At lon 131 deg the Sinusoidal plane is strongly sheared; plane distances misorder neighbours. The NN must follow
+    the WGS84 surface distance."""
+    from pyproj import Transformer
+    w = _small_window(nx750=1, ny750=1)
+    tlon, tlat = v.target_lonlat(w, "375m")
+    lon0, lat0 = tlon[0, 0], tlat[0, 0]
+    fwd = Transformer.from_crs("EPSG:4326", w.grid.crs, always_xy=True)
+    X0, Y0 = fwd.transform(lon0, lat0)
+    found = None
+    for az_a in range(0, 360, 5):
+        for az_b in range(0, 360, 5):
+            a, b = _from(lon0, lat0, az_a, 100.0), _from(lon0, lat0, az_b, 110.0)        # a is nearer on the ground
+            (xa, ya), (xb, yb) = fwd.transform(*a), fwd.transform(*b)
+            if np.hypot(xb - X0, yb - Y0) < np.hypot(xa - X0, ya - Y0) - 5.0:          # but b is nearer on the plane
+                found = (a, b)
+                break
+        if found:
+            break
+    assert found, "expected Sinusoidal shear to misorder distances at lon 131"
+    (a, b) = found
+    m = v.nn_map(_src([a[0], b[0]], [a[1], b[1]], half=300.0), w, "375m")
+    assert m.src[0, 0] == 0 and m.dist[0, 0] == pytest.approx(100.0, abs=1e-3)
 
 
 def test_nn_exact_tie_is_deterministic_by_sensor_zenith():
-    w = v.GridWindow(0.0, 0.0, 750.0, 750.0)
-    c = 187.5
-    s = _src([c - 10, c + 10], [562.5, 562.5], half=400.0, szen=[5000, 3000])
+    w = _small_window(nx750=1, ny750=1)
+    tlon, tlat = v.target_lonlat(w, "375m")
+    e, west = _from(tlon[0, 0], tlat[0, 0], 90, 10.0), _from(tlon[0, 0], tlat[0, 0], 270, 10.0)
+    s = _src([west[0], e[0]], [west[1], e[1]], half=400.0, szen=[5000, 3000])
     assert v.nn_map(s, w, "375m").src[0, 0] == 1
-    s2 = _src([c + 10, c - 10], [562.5, 562.5], half=400.0, szen=[3000, 5000])
+    s2 = _src([e[0], west[0]], [e[1], west[1]], half=400.0, szen=[3000, 5000])
     assert v.nn_map(s2, w, "375m").src[0, 0] == 0
 
 
@@ -291,7 +380,9 @@ def test_process_day_outputs_cache_reuse_and_files(tmp_path):
     i_tif = next((base / "overpass" / "375m").glob("*_375m.tif"))
     m_tif = next((base / "overpass" / "750m").glob("*_750m.tif"))
     with rasterio.open(i_tif) as ri, rasterio.open(m_tif) as rm:
-        assert ri.crs.to_epsg() == 32652 and rm.crs.to_epsg() == 32652
+        from pyproj import CRS as PCRS
+        sinu = PCRS.from_user_input(v.VIIRS_SINUSOIDAL_GRID.crs)
+        assert PCRS.from_user_input(ri.crs.to_wkt()).equals(sinu) and PCRS.from_user_input(rm.crs.to_wkt()).equals(sinu)
         assert ri.descriptions == tuple(v.I_BANDS) and rm.descriptions == tuple(v.M_BANDS)
         assert ri.transform.a == 375.0 and rm.transform.a == 750.0 and (ri.transform.c, ri.transform.f) == (rm.transform.c, rm.transform.f)
     prov = next((base / "daily" / "provenance").glob("*_provenance_375m.tif"))
