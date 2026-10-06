@@ -138,6 +138,10 @@ GCOMC_RAW_FIELDS = [
 ]
 GCOMC_FIELDS: List[FieldSpec] = GCOMC_REFLECTANCE_250M + GCOMC_REFLECTANCE_1KM + GCOMC_RAW_FIELDS
 _QA_FIELD = GCOMC_RAW_FIELDS[0]
+# Reflectance output: one multi-band GeoTIFF per native grid (band order fixed as listed). The two grids are never
+# combined (that would require resampling one of them). QA / ancillary fields stay separate raw-integer files.
+GCOMC_REFLECTANCE_GROUPS: Dict[str, List[FieldSpec]] = {"250m": GCOMC_REFLECTANCE_250M, "1km": GCOMC_REFLECTANCE_1KM}
+GCOMC_OUTPUT_LAYOUT = "multiband_by_resolution"
 
 _REQUIRED_FIELD_ATTRS = ("Slope", "Offset", "Error_DN", "Minimum_valid_DN", "Maximum_valid_DN", "Data_description")
 
@@ -883,12 +887,64 @@ def _write_geotiff(path: Path, array: np.ndarray, *, transform: Affine, nodata: 
     os.replace(tmp, path)
 
 
+def _write_reflectance_multiband(path: Path, arrays: List[np.ndarray], band_meta: List[Dict[str, Any]], *, transform: Affine,
+                                 tags: Dict[str, Any], footprint: Optional[np.ndarray]) -> Path:
+    """Stack same-grid float32 reflectance bands into one GeoTIFF (no resampling, values written as computed).
+    Every band carries its own description and band-level tags; a sidecar JSON repeats the band table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".part.tif")
+    shape = arrays[0].shape
+    if any(a.shape != shape or a.dtype != np.float32 for a in arrays):
+        raise GCOMCError(f"{path.name}: bands differ in shape/dtype; refusing to stack")
+    profile: Dict[str, Any] = {
+        "driver": "GTiff", "height": shape[0], "width": shape[1], "count": len(arrays), "dtype": "float32",
+        "crs": eqa_crs(), "transform": transform, "compress": "lzw", "nodata": float("nan"),
+    }
+    with rasterio.open(tmp, "w", **profile) as dst:
+        for i, (a, m) in enumerate(zip(arrays, band_meta), start=1):
+            dst.write(a, i)
+            dst.set_band_description(i, m["band_name"])
+            dst.update_tags(i, **{k: str(v) for k, v in m.items()})
+        if footprint is not None:
+            dst.write_mask(footprint.astype(np.uint8) * np.uint8(255))
+        dst.update_tags(**{k: str(v) for k, v in tags.items()})
+    os.replace(tmp, path)
+    side = path.with_suffix(".json")
+    side_tmp = side.with_name(side.name + ".part")
+    side_tmp.write_text(json.dumps({"file": path.name, "layout": GCOMC_OUTPUT_LAYOUT, "dtype": "float32", "nodata": "NaN",
+                                    "shape": list(shape), "transform": list(transform)[:6], "crs": eqa_crs().to_wkt(),
+                                    "global_tags": tags, "bands": band_meta}, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(side_tmp, side)
+    return side
+
+
+def reflectance_output_path(out_dir: Path, grid: str, obs: date) -> Path:
+    """Multi-band reflectance GeoTIFF of one native grid ("250m": VN01-VN11, SW03; "1km": SW01, SW02, SW04)."""
+    return out_dir / grid / f"GCOMC_SGLI_RSRF_{obs:%Y%m%d}_{GCOMC_ORBIT_DIRECTION}_{grid}.tif"
+
+
 def output_path(out_dir: Path, spec: FieldSpec, obs: date) -> Path:
+    """Single-field raw QA / ancillary GeoTIFF (also the layout of reflectance files written before the multi-band change)."""
     return out_dir / spec.group / spec.name / f"GCOMC_SGLI_RSRF_{obs:%Y%m%d}_{GCOMC_ORBIT_DIRECTION}_{spec.name}.tif"
 
 
 def summary_path(out_dir: Path, obs: date) -> Path:
     return out_dir / "summary" / f"GCOMC_SGLI_RSRF_{obs:%Y%m%d}_{GCOMC_ORBIT_DIRECTION}.json"
+
+
+def _preserve_previous_layout_summary(sp: Path) -> None:
+    """A summary written by the earlier single-band layout lists files that still exist (they are never deleted or
+    overwritten). Keep that summary next to the new one instead of overwriting it."""
+    if not sp.exists():
+        return
+    try:
+        prev = json.loads(sp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if prev.get("files") and prev.get("output_layout") != GCOMC_OUTPUT_LAYOUT:
+        legacy = sp.with_name(sp.stem + ".single_band_legacy.json")
+        if not legacy.exists():
+            os.replace(sp, legacy)
 
 
 def process_date(
@@ -954,43 +1010,71 @@ def process_date(
         "geolocation_model": "JAXA SGLI GeoTIFF tool (manual v1.2 App.7.1) continuous EQA definition; "
                              "affine reproduces it to <1e-10 px; data verified to follow it (not the Handbook NINT variant)",
     }
-    for spec in GCOMC_FIELDS:
-        win = windows[spec.grid]
-        dn = read_mosaic(win, spec, tile_files)
+    summary["output_layout"] = GCOMC_OUTPUT_LAYOUT
+    summary["sidecars"] = []
+    summary["band_order"] = {grid: [s.name for s in specs] for grid, specs in GCOMC_REFLECTANCE_GROUPS.items()}
+
+    def _field_meta(spec: FieldSpec) -> Dict[str, Any]:
         meta = first_meta.get("fields", {}).get(spec.name, {})
         for p in available.values():
             other = (p.metadata or {}).get("fields", {}).get(spec.name, {})
             for key in ("slope", "offset", "error_dn", "min_valid_dn", "max_valid_dn"):
                 if other.get(key) != meta.get(key):
                     raise GCOMCSchemaError(f"{spec.hdf5_path}: {key} differs between tiles ({other.get(key)} vs {meta.get(key)})")
-        footprint = footprints[spec.grid]
-        tags = dict(common)
-        tags.update(
-            field=spec.name, hdf5_path=f"/{spec.hdf5_path}", native_grid=spec.grid,
-            native_tile_pixels=GCOMC_TILE_PIXELS[spec.grid], native_pixel_size_m=f"{win.transform.a:.6f}",
-            native_resolution_deg=f"{EQA_TILE_DEG / GCOMC_TILE_PIXELS[spec.grid]:.10f}",
-            data_description=meta.get("data_description", ""), slope=meta.get("slope"), offset=meta.get("offset"),
-            error_dn=meta.get("error_dn"), valid_dn_range=f"{meta.get('min_valid_dn')}..{meta.get('max_valid_dn')}",
-        )
-        if spec.kind == "reflectance":
+        return meta
+
+    def _source_tags(spec: FieldSpec, meta: Dict[str, Any], win: GlobalWindow) -> Dict[str, Any]:
+        return {"band_name": spec.name, "hdf5_path": f"/{spec.hdf5_path}", "native_grid": spec.grid,
+                "native_tile_pixels": GCOMC_TILE_PIXELS[spec.grid], "native_pixel_size_m": f"{win.transform.a:.6f}",
+                "native_resolution_deg": f"{EQA_TILE_DEG / GCOMC_TILE_PIXELS[spec.grid]:.10f}",
+                "data_description": meta.get("data_description", ""), "slope": meta.get("slope"), "offset": meta.get("offset"),
+                "error_dn": meta.get("error_dn"), "valid_dn_range": f"{meta.get('min_valid_dn')}..{meta.get('max_valid_dn')}"}
+
+    # reflectance: one multi-band float32 GeoTIFF per native grid; band order = GCOMC_REFLECTANCE_GROUPS
+    for grid, specs in GCOMC_REFLECTANCE_GROUPS.items():
+        win = windows[grid]
+        footprint = footprints[grid]
+        arrays: List[np.ndarray] = []
+        band_meta: List[Dict[str, Any]] = []
+        for index, spec in enumerate(specs, start=1):
+            meta = _field_meta(spec)
+            dn = read_mosaic(win, spec, tile_files)
             arr = dn_to_reflectance(dn, meta["slope"], meta["offset"], meta["error_dn"], meta["min_valid_dn"], meta["max_valid_dn"])
             if footprint is not None:
                 arr[~footprint] = np.nan
-            nodata: Optional[float] = float("nan")
-            tags.update(scale_offset_applied=True, units="reflectance (unitless)", reflectance_type=spec.reflectance_type,
-                        center_wavelength_nm=meta.get("center_wavelength_nm", ""))
-            valid = ~np.isnan(arr)
-        else:
-            arr = dn.copy()
-            if footprint is not None:
-                arr[~footprint] = meta["error_dn"]
-            nodata = float(meta["error_dn"])
-            tags.update(scale_offset_applied=False, raw_integer=True,
-                        note="raw integer; Slope/Offset NOT applied")
-            valid = arr != meta["error_dn"]
+            arrays.append(arr)
+            band_meta.append({"band_index": index, **_source_tags(spec, meta, win), "reflectance_type": spec.reflectance_type,
+                              "center_wavelength_nm": meta.get("center_wavelength_nm", ""), "scale_offset_applied": True,
+                              "units": "reflectance (unitless)"})
+            summary["band_valid_fraction_in_aoi"][spec.name] = round(float((~np.isnan(arr))[aoi_masks[grid]].mean()), 6)
+        tags = dict(common)
+        tags.update(native_grid=grid, native_tile_pixels=GCOMC_TILE_PIXELS[grid], native_pixel_size_m=f"{win.transform.a:.6f}",
+                    layout=GCOMC_OUTPUT_LAYOUT, band_order=",".join(s.name for s in specs), scale_offset_applied=True,
+                    units="reflectance (unitless)",
+                    reflectance_types=",".join(f"{s.name}={s.reflectance_type}" for s in specs),
+                    note="per-band source path, scale/offset, Error_DN, valid range and reflectance type are band-level tags")
+        path = reflectance_output_path(out_dir, grid, obs)
+        side = _write_reflectance_multiband(path, arrays, band_meta, transform=win.transform, tags=tags, footprint=footprint)
+        summary["files"].append(str(path))
+        summary["sidecars"].append(str(side))
+
+    # QA / ancillary: raw integers in their own dtype, one field per file (never cast, never mixed with reflectance)
+    for spec in GCOMC_RAW_FIELDS:
+        win = windows[spec.grid]
+        meta = _field_meta(spec)
+        dn = read_mosaic(win, spec, tile_files)
+        footprint = footprints[spec.grid]
+        tags = dict(common)
+        tags.update(field=spec.name, **{k: v for k, v in _source_tags(spec, meta, win).items() if k != "band_name"})
+        arr = dn.copy()
+        if footprint is not None:
+            arr[~footprint] = meta["error_dn"]
+        tags.update(scale_offset_applied=False, raw_integer=True, note="raw integer; Slope/Offset NOT applied")
+        valid = arr != meta["error_dn"]
         summary["band_valid_fraction_in_aoi"][spec.name] = round(float(valid[aoi_masks[spec.grid]].mean()), 6)
         path = output_path(out_dir, spec, obs)
-        _write_geotiff(path, arr, transform=win.transform, nodata=nodata, tags=tags, band_name=spec.name, footprint=footprint)
+        _write_geotiff(path, arr, transform=win.transform, nodata=float(meta["error_dn"]), tags=tags, band_name=spec.name,
+                       footprint=footprint)
         summary["files"].append(str(path))
     return summary
 
@@ -1050,7 +1134,9 @@ def _process_gcomc_surface_reflectance(
         if file_exists_mode == "skip" and sp.exists():
             try:
                 prev = json.loads(sp.read_text(encoding="utf-8"))
-                if all(Path(p).exists() for p in prev.get("files", [])):
+                # dates with no observation have no files; observed dates are only skipped in the current layout
+                current = prev.get("output_layout") == GCOMC_OUTPUT_LAYOUT or prev.get("aoi_status") == AOI_NO_DATA
+                if current and all(Path(p).exists() for p in prev.get("files", [])):
                     LOGGER.info("GCOM-C/SGLI: skipping %s, outputs already exist", d)
                     summary["dates_skipped"].append(d.isoformat())
                     continue
@@ -1116,6 +1202,7 @@ def _process_gcomc_surface_reflectance(
                 continue
             sp = summary_path(out_dir, d)
             sp.parent.mkdir(parents=True, exist_ok=True)
+            _preserve_previous_layout_summary(sp)
             tmp = sp.with_name(sp.name + ".part")
             tmp.write_text(json.dumps(day, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, sp)

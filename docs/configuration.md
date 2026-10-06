@@ -359,18 +359,29 @@ docker compose の `gcomc` サービスでは `GCOMC_RAW_DIR=/gcomc_data/raw` �
 #### 出力
 
 ```
-output/gcomc/rsrf/250m/VN01 … VN11, SW03/   GCOMC_SGLI_RSRF_YYYYMMDD_D_<band>.tif（float32 反射率）
-output/gcomc/rsrf/1km/SW01, SW02, SW04/       GCOMC_SGLI_RSRF_YYYYMMDD_D_<band>.tif（float32 反射率）
-output/gcomc/rsrf/qa/QA_flag, Land_water_flag, Obs_time/   raw 整数（scale なし）
-output/gcomc/rsrf/summary/GCOMC_SGLI_RSRF_YYYYMMDD_D.json  プロダクト状態・AOI 状態・バンド別有効率
+output/gcomc/rsrf/250m/GCOMC_SGLI_RSRF_YYYYMMDD_D_250m.tif   12 バンド float32 反射率: 1 VN01 … 11 VN11, 12 SW03
+output/gcomc/rsrf/250m/GCOMC_SGLI_RSRF_YYYYMMDD_D_250m.json  バンド表（sidecar）
+output/gcomc/rsrf/1km/GCOMC_SGLI_RSRF_YYYYMMDD_D_1km.tif     3 バンド float32 反射率: 1 SW01, 2 SW02 (TOA), 3 SW04
+output/gcomc/rsrf/1km/GCOMC_SGLI_RSRF_YYYYMMDD_D_1km.json    バンド表（sidecar）
+output/gcomc/rsrf/qa/QA_flag, Land_water_flag, Obs_time/     1 項目 1 ファイル、raw 整数（uint16 / uint8 / int16、scale なし）
+output/gcomc/rsrf/summary/GCOMC_SGLI_RSRF_YYYYMMDD_D.json    プロダクト状態・AOI 状態・バンド別有効率・band_order
 ```
+
+- 反射率は同じ native grid・shape・transform のバンドを 1 ファイルに stack するだけです（resampling・再計算なし）。
+  250 m と 1 km は別ファイルで、どちらかを resampling して 1 ファイルにまとめることはしません。
+- 各バンドの band description はバンド名で、band-level tag と sidecar JSON に band index、HDF5 の dataset path、native grid・画素寸法、
+  Slope、Offset、Error_DN、有効 DN 範囲、`reflectance_type` を保持します（SW02 は `reflectance_type=TOA reflectance`、他は surface reflectance）。
+- QA_flag / Land_water_flag / Obs_time は物理量も dtype も異なり、raw の値・bit pattern をそのまま残すため、反射率ファイルには入れず、
+  float への変換もしません。
+- 以前の 1 バンド 1 ファイル形式（`250m/<band>/…_<band>.tif`）で処理済みのファイルは削除・上書きしません。
+  その日の summary は `…_D.single_band_legacy.json` として残し、新しい multi-band 出力を作ります（ファイル名が異なるため衝突しません）。
 
 - 250 m（実際の画素 231.66 m）と 1 km（926.63 m）は別グリッドのまま出力し、1 km バンドを 250 m に upsample しません。
   250 m と 1 km を同じラスタに統合することもしません（統合方法は後段の前処理で決める前提です）。
 - AOI が T0528/T0529 のように複数タイルに跨る場合は、同じ native グリッド上で整数インデックスによりモザイクしてから
-  AOI の最小 bbox で切り出します（resampling なし）。日付・バンドごとに1枚です。
+  AOI の最小 bbox で切り出します（resampling なし）。日付・native grid ごとに1枚です。
 - 反射率は HDF5 属性の `Slope`/`Offset` を使って `DN × Slope + Offset` を float32 で保存し、`Error_DN` と有効範囲外は NaN にします。
-- **SW02 は公式定義上 TOA reflectance** です。GeoTIFF タグ `reflectance_type=TOA reflectance` で区別しています。
+- **SW02 は公式定義上 TOA reflectance** です。1 km ファイルの band 2 の band-level タグ `reflectance_type=TOA reflectance` で区別しています。
 - 雲画素にも反射率値は入っています。downloader は雲を NaN にしません（QA_flag を使った雲除去は後段の役割です）。
 - CRS は EQA タイルグリッドの sinusoidal（`+proj=sinu +lon_0=0 +R=6371007.181`）で、メートル座標は JAXA の L2 EQA タイル GeoTIFF 定義
   （Sphere_Sinusoidal、pixel scale 231.65635827 m）と同じです。画素中心は JAXA 公式 GeoTIFF ツールの定義と一致し、

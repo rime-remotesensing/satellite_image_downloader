@@ -377,3 +377,24 @@ JAXA 自身の L2 EQA タイル GeoTIFF の定義（Higher Level Product Format 
 - ハンドブックの NINT 式とは最大 0.217 px（250 m で 50 m）異なりますが、v3002 のデータはその式に従っていません。
   ハンドブックの式で画素位置を計算すると、むしろ最大 0.2 px の誤差を持ち込むことになります。
 - 監査スクリプトと結果は raw アーカイブ側の `logs/` に保存しています。
+
+## 8. 反射率の解像度別 multi-band 化（2026-10-06）
+
+### 8.1 出力形式
+
+- **反射率**: 解像度ごとに 1 ファイルにまとめました。
+  - 250 m: `250m/GCOMC_SGLI_RSRF_<date>_D_250m.tif`（12 バンド: VN01–VN11, SW03）
+  - 1 km: `1km/…_1km.tif`（3 バンド: SW01, SW02, SW04）
+- **QA / ancillary**: 従来どおり 1 項目 1 ファイルの raw 整数です。
+
+### 8.2 実データでの同一性の確認
+
+前回 commit のコードで作った 1 バンド 1 ファイルの出力と、新しい multi-band 出力を比べました。対象は 2024-04-09 の 2 ケース（T0528+T0529、T0528 のみ）です。
+
+- **反射率**: 全 15 バンドの値が bit 単位で一致しました。
+  - NaN の位置、shape、transform、CRS、mask も一致しました。
+  - band-level metadata（HDF5 path、Slope、Offset、Error_DN、有効範囲、reflectance_type、中心波長）も一致しました。
+- **SW02**: band 2 として `reflectance_type=TOA reflectance` を保持しています。
+- **QA / ancillary**: QA_flag / Land_water_flag / Obs_time は dtype（uint16 / uint8 / int16）と値がすべて一致しました。
+
+スクリプトと結果は raw アーカイブ側の `multiband_audit/` に保存しています。
