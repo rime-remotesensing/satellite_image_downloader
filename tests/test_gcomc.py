@@ -407,31 +407,87 @@ def _read(path: Path):
         return r.read(1), r.transform, r.tags(), r.dtypes[0], r.nodata
 
 
+def _read_mb(path: Path):
+    with rasterio.open(path) as r:
+        return (r.read(), r.transform, r.tags(), [r.tags(i) for i in range(1, r.count + 1)], r.descriptions, r.dtypes, r.crs)
+
+
+B250 = ["VN01", "VN02", "VN03", "VN04", "VN05", "VN06", "VN07", "VN08", "VN09", "VN10", "VN11", "SW03"]
+B1K = ["SW01", "SW02", "SW04"]
+
+
 def test_routing_native_grids_qa_raw_and_sw02_type(tmp_path):
     raw, out = tmp_path / "raw", tmp_path / "out"
     prods = {(5, 28): _cached(raw, "GC1SG1_20240409D01D_T0528_L2SG_RSRFQ_3002"),
              (5, 29): _cached(raw, "GC1SG1_20240409D01D_T0529_L2SG_RSRFQ_3002")}
     s = gcomc.process_date(date(2024, 4, 9), prods, CROSS_AOI, out)
-    assert s["aoi_status"] == gcomc.AOI_OBSERVED
-    vn08 = out / "250m" / "VN08" / "GCOMC_SGLI_RSRF_20240409_D_VN08.tif"
-    sw03 = out / "250m" / "SW03" / "GCOMC_SGLI_RSRF_20240409_D_SW03.tif"
-    sw02 = out / "1km" / "SW02" / "GCOMC_SGLI_RSRF_20240409_D_SW02.tif"
+    assert s["aoi_status"] == gcomc.AOI_OBSERVED and s["output_layout"] == "multiband_by_resolution"
+    f250 = out / "250m" / "GCOMC_SGLI_RSRF_20240409_D_250m.tif"
+    f1k = out / "1km" / "GCOMC_SGLI_RSRF_20240409_D_1km.tif"
     qa = out / "qa" / "QA_flag" / "GCOMC_SGLI_RSRF_20240409_D_QA_flag.tif"
-    assert vn08.exists() and sw03.exists() and sw02.exists() and qa.exists()
-    assert not (out / "250m" / "SW02").exists() and not (out / "1km" / "VN08").exists() and not (out / "250m" / "SW04").exists()
-    a250, t250, tags250, dt250, _ = _read(vn08)
-    a1k, t1k, tags1k, dt1k, _ = _read(sw02)
+    assert f250.exists() and f1k.exists() and qa.exists()
+    assert not [p for p in (out / "250m").iterdir() if p.is_dir()] and not [p for p in (out / "1km").iterdir() if p.is_dir()]  # no per-band folders
+    a250, t250, g250, b250, d250, dt250, _ = _read_mb(f250)
+    a1k, t1k, g1k, b1k, d1k, dt1k, _ = _read_mb(f1k)
+    assert d250 == tuple(B250) and d1k == tuple(B1K)                                        # fixed band order
+    assert set(dt250) == set(dt1k) == {"float32"} and a250.shape[0] == 12 and a1k.shape[0] == 3
+    assert [b["band_index"] for b in b250] == [str(i) for i in range(1, 13)]
+    assert abs(t1k.a / t250.a - 4.0) < 1e-12                                                # 1 km kept on its own grid
+    assert a1k.shape[1] <= math.ceil(a250.shape[1] / 4) + 1
+    sw02 = b1k[1]
+    assert sw02["band_name"] == "SW02" and sw02["reflectance_type"] == "TOA reflectance" and "TOA" in sw02["data_description"]
+    assert b1k[0]["reflectance_type"] == b1k[2]["reflectance_type"] == "surface reflectance"
+    assert all(b["reflectance_type"] == "surface reflectance" for b in b250)
+    for b, name in zip(b250 + b1k, B250 + B1K):                                             # band-level source metadata
+        assert b["hdf5_path"] == f"/Image_data/Rs_{name}" and b["slope"] and b["error_dn"] and ".." in b["valid_dn_range"]
+        assert b["native_grid"] in ("250m", "1km") and "offset" in b
+    assert "SW02=TOA reflectance" in g1k["reflectance_types"]
+    side = json.loads(f1k.with_suffix(".json").read_text())
+    assert [b["band_name"] for b in side["bands"]] == B1K and side["bands"][1]["reflectance_type"] == "TOA reflectance"
     aqa, tqa, tagsqa, dtqa, ndqa = _read(qa)
-    assert dt250 == dt1k == "float32"
-    assert abs(t1k.a / t250.a - 4.0) < 1e-12              # 1 km kept on its own grid, never upsampled
-    assert a1k.shape[0] <= math.ceil(a250.shape[0] / 4) + 1
-    assert tags1k["reflectance_type"] == "TOA reflectance" and "TOA" in tags1k["data_description"]
-    assert tags250["reflectance_type"] == "surface reflectance"
-    assert _read(sw03)[2]["reflectance_type"] == "surface reflectance"
     assert dtqa == "uint16" and tagsqa["scale_offset_applied"] == "False"
     assert set(np.unique(aqa)) <= {2, 1}                  # raw values (2) and Error_DN fill outside bbox; never scaled
-    assert np.isclose(np.nanmax(a250), 2000 * 9.9999997e-05, rtol=0, atol=1e-7)
-    assert tags250["resampling"] == "none" and tags250["raster_reprojected"] == "False"
+    assert np.isclose(np.nanmax(a250[7]), 2000 * 9.9999997e-05, rtol=0, atol=1e-7)
+    assert g250["resampling"] == "none" and g250["raster_reprojected"] == "False"
+
+
+def test_multiband_values_equal_per_band_conversion(tmp_path):
+    """Stacking only: each band equals dn_to_reflectance of that band's native mosaic (no recomputation / resampling)."""
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    prods = {(5, 28): _cached(raw, "GC1SG1_20240409D01D_T0528_L2SG_RSRFQ_3002", dn250=1000),
+             (5, 29): _cached(raw, "GC1SG1_20240409D01D_T0529_L2SG_RSRFQ_3002", dn250=3000)}
+    gcomc.process_date(date(2024, 4, 9), prods, CROSS_AOI, out)
+    a250, t250, *_ = _read_mb(out / "250m" / "GCOMC_SGLI_RSRF_20240409_D_250m.tif")
+    bbox = gcomc.geometry_bounds(gcomc._aoi_bbox_geometry_in_crs(CROSS_AOI, gcomc.eqa_crs()))
+    win = gcomc.native_window_for_bounds(bbox, "250m")
+    files = {k: p.local_path for k, p in prods.items()}
+    for i, spec in enumerate(gcomc.GCOMC_REFLECTANCE_250M):
+        meta = prods[(5, 28)].metadata["fields"][spec.name]
+        ref = gcomc.dn_to_reflectance(gcomc.read_mosaic(win, spec, files), meta["slope"], meta["offset"], meta["error_dn"],
+                                      meta["min_valid_dn"], meta["max_valid_dn"])
+        both = ~np.isnan(a250[i])
+        assert np.array_equal(a250[i][both], ref[both])
+
+
+def test_existing_single_band_outputs_are_kept(tmp_path):
+    raw = tmp_path / "raw"
+    ident = "GC1SG1_20240409D01D_T0528_L2SG_RSRFQ_3002"
+    make_rsrf(gcomc.local_raw_path(raw, _granule(ident)), ident)
+    out = tmp_path / "output" / "gcomc" / "rsrf"
+    old = out / "250m" / "VN08" / "GCOMC_SGLI_RSRF_20240409_D_VN08.tif"          # file of the previous layout
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"old single-band file")
+    sp = gcomc.summary_path(out, date(2024, 4, 9))
+    sp.parent.mkdir(parents=True)
+    sp.write_text(json.dumps({"aoi_status": "OBSERVED", "files": [str(old)]}))      # old summary, no output_layout
+    s = _run(tmp_path, [_record(ident)], raw, start=date(2024, 4, 9), end=date(2024, 4, 9))
+    assert [d["date"] for d in s["dates_processed"]] == ["2024-04-09"]               # not skipped: layout differs
+    assert old.read_bytes() == b"old single-band file"                               # never deleted or overwritten
+    assert json.loads(sp.with_name(sp.stem + ".single_band_legacy.json").read_text())["files"] == [str(old)]
+    assert json.loads(sp.read_text())["output_layout"] == "multiband_by_resolution"
+    assert (out / "250m" / "GCOMC_SGLI_RSRF_20240409_D_250m.tif").exists()
+    s2 = _run(tmp_path, [_record(ident)], raw, start=date(2024, 4, 9), end=date(2024, 4, 9))
+    assert s2["dates_skipped"] == ["2024-04-09"]                                      # current layout -> skipped
 
 
 def test_mosaic_places_both_tiles_without_resampling(tmp_path):
@@ -439,7 +495,8 @@ def test_mosaic_places_both_tiles_without_resampling(tmp_path):
     prods = {(5, 28): _cached(raw, "GC1SG1_20240409D01D_T0528_L2SG_RSRFQ_3002", dn250=1000),
              (5, 29): _cached(raw, "GC1SG1_20240409D01D_T0529_L2SG_RSRFQ_3002", dn250=3000)}
     gcomc.process_date(date(2024, 4, 9), prods, CROSS_AOI, out)
-    arr, tr, *_ = _read(out / "250m" / "VN01" / "GCOMC_SGLI_RSRF_20240409_D_VN01.tif")
+    with rasterio.open(out / "250m" / "GCOMC_SGLI_RSRF_20240409_D_250m.tif") as r:
+        arr, tr = r.read(1), r.transform                                           # band 1 = VN01
     vals = set(np.round(np.unique(arr[~np.isnan(arr)]), 6))
     assert vals == {np.float32(0.1).round(6), np.float32(0.3).round(6)}  # exact DN from each tile, nothing blended
     # the column where values switch lies exactly on the global tile edge (h=29 start)

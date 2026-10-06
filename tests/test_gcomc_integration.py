@@ -72,15 +72,16 @@ def test_case_b_20240409_t0528_scaling_geolocation_qa_geotiff(tmp_path):
     prods = _products(CASE_FILES[2])
     s = gcomc.process_date(date(2024, 4, 9), prods, ASO, tmp_path)
     assert s["aoi_status"] == gcomc.AOI_PARTIAL  # Aso AOI also extends into T0529, which is not supplied here
-    vn08 = tmp_path / "250m" / "VN08" / "GCOMC_SGLI_RSRF_20240409_D_VN08.tif"
-    sw01 = tmp_path / "1km" / "SW01" / "GCOMC_SGLI_RSRF_20240409_D_SW01.tif"
+    f250 = tmp_path / "250m" / "GCOMC_SGLI_RSRF_20240409_D_250m.tif"   # multi-band: VN01..VN11, SW03
+    f1k = tmp_path / "1km" / "GCOMC_SGLI_RSRF_20240409_D_1km.tif"      # multi-band: SW01, SW02, SW04
     lwf = tmp_path / "qa" / "Land_water_flag" / "GCOMC_SGLI_RSRF_20240409_D_Land_water_flag.tif"
     qa = tmp_path / "qa" / "QA_flag" / "GCOMC_SGLI_RSRF_20240409_D_QA_flag.tif"
-    with rasterio.open(vn08) as r250, rasterio.open(sw01) as r1k:
+    with rasterio.open(f250) as r250, rasterio.open(f1k) as r1k:
+        assert r250.descriptions[7] == "VN08" and r1k.descriptions[0] == "SW01"
         # JAXA L2 EQA-tile GeoTIFF pixel scale (231.65635827 m / 926.62543306 m)
         assert abs(r250.transform.a - 231.65635827) < 1e-6 and abs(r1k.transform.a - 926.62543306) < 1e-6
         assert r250.crs == r1k.crs == gcomc.eqa_crs()
-        a250, t250 = r250.read(1), r250.transform
+        a250, t250 = r250.read(8), r250.transform                 # band 8 = VN08
     # exact scaling against the HDF5 DN at the same native pixel
     path = prods[(5, 28)].local_path
     x0, y0 = gcomc._eqa_origin()
@@ -112,10 +113,11 @@ def test_case_c_20240409_t0528_t0529_boundary_mosaic(tmp_path):
     s = gcomc.process_date(date(2024, 4, 9), prods, ASO, tmp_path)
     assert s["aoi_status"] == gcomc.AOI_OBSERVED
     assert s["band_valid_fraction_in_aoi"]["VN08"] > 0.99 and s["band_valid_fraction_in_aoi"]["SW02"] > 0.99
-    tif = tmp_path / "250m" / "VN08" / "GCOMC_SGLI_RSRF_20240409_D_VN08.tif"
-    assert len(list((tmp_path / "250m" / "VN08").glob("*.tif"))) == 1  # one raster per date and band
+    tif = tmp_path / "250m" / "GCOMC_SGLI_RSRF_20240409_D_250m.tif"
+    assert len(list((tmp_path / "250m").glob("*.tif"))) == 1  # one 250 m raster per date
     with rasterio.open(tif) as r:
-        arr, t = r.read(1), r.transform
+        assert r.descriptions[7] == "VN08"
+        arr, t = r.read(8), r.transform
         assert r.tags()["tiles"] == "T0528,T0529"
     x0, y0 = gcomc._eqa_origin()
     edge = int(round((x0 + 29 * 4800 * t.a - t.c) / t.a))  # window column where T0529 starts
