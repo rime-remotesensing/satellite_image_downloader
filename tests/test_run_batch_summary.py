@@ -67,7 +67,8 @@ def _config(tmp_path, platforms, viirs_product=None, raw=None):
 
 
 def _run_l2(tmp_path, platforms, entries, viirs_product=None):
-    with patch.object(viirs_l2, "LAADSClient", lambda: FakeLAADS(entries)):
+    with patch.object(viirs_l2, "LAADSClient", lambda: FakeLAADS(entries)), \
+         patch("src.surface_reflectance._earthdata_login", return_value=None):
         return pipeline.run_pipeline(_config(tmp_path, platforms, viirs_product), tmp_path)
 
 

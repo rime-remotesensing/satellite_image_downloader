@@ -142,6 +142,20 @@ def _expand_bbox_by_meters(
     return expanded
 
 
+def _bbox_to_rectangle_geometry(bbox: Tuple[float, float, float, float]) -> Dict[str, Any]:
+    west, south, east, north = bbox
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [west, south],
+            [east, south],
+            [east, north],
+            [west, north],
+            [west, south],
+        ]],
+    }
+
+
 def _point_on_segment(
     x: float,
     y: float,

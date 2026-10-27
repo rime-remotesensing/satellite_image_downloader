@@ -11,15 +11,17 @@
 geojson: ./config/no5.geojson
 
 # Period（複数期間を順番に実行したい場合は配列で指定。startday/enddayは同じ要素数）
-startday: [20230120, 20230121]
-endday:   [20230120, 20230121]
+startday: [20250214, 20250322]
+endday:   [20250214, 20250322]
 
 # Satellite imagery
 # sentinel2 / landsat89: Microsoft Planetary Computer から取得
 # modis / viirs: NASA Earthdata から daily Surface Reflectance を取得
+# プラットフォームを絞りたい場合は "modis-aqua" / "viirs-noaa20" のように指定可能
+# (modis: terra, aqua / viirs: snpp, noaa20, noaa21。無qualifierならmodis=両方、viirs=snppのみ)
 satellite:
-  - modis
-  - viirs
+  - modis-aqua
+
 
 # Band selection（Sentinel-2 / Landsat 8-9のみ）
 # band: all で全バンド、band: at + num: [..] で指定バンドのみ
@@ -38,3 +40,15 @@ snowmask: true
 # NRT  = Near Real-Time（速報値）
 # none = Active Fire を取得しない
 activefire: SP
+# AOI buffer（省略時 or 0 = 従来通りAOIそのまま。km単位、上下左右に均等に拡張）
+# Sentinel-2 / Landsat / MODIS Surface Reflectance / VIIRS Surface Reflectance /
+# burned-area (MCD64A1, VNP64A1) のdownload検索・output cropに反映されます。
+# FIRMS Active Fire（firms.bbox_buffer_m）とは別概念で、互いに影響しません。
+buffer_km: 0
+
+# Burned area (monthly MCD64A1 / VNP64A1)。省略 or [] なら取得しません。
+# startday/enddayは上記と同じ日付を使用し、月境界をまたぐ場合は自動的に
+# 該当する月次granuleを取得してBurn Date(DOY)から期間内のpixelのみ抽出します。
+burned_area:
+  - MCD64A1   # MODIS, 500m monthly, .061
+  #- VNP64A1   # VIIRS (S-NPP), 500m monthly, .002

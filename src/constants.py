@@ -105,12 +105,37 @@ SURFACE_REFLECTANCE_DEFAULT_PRODUCTS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# MCD64A1 / VNP64A1 monthly burned-area products
+# ---------------------------------------------------------------------------
+# Both are monthly-tiled 500m native Sinusoidal products (the same grid as
+# MOD09GA/VNP09GA), confirmed by direct pyhdf inspection of real downloaded
+# granules (MCD64A1.A2024032.h28v05.061 and VNP64A1.A2024001.h28v05.002):
+# both expose SDS names "Burn Date", "Burn Date Uncertainty", "QA",
+# "First Day", "Last Day" (HDF4 SDS names are the literal on-disk field
+# names, unlike VIIRS's HDFEOS "_1"-suffixed paths). "Burn Date" is int16,
+# valid_range=[0, 366] (0 = valid land, no burn that month; 1-366 = ordinal
+# day-of-year of burn), _FillValue=-1 (unmapped/nodata), and a separate
+# "water"=-2 attribute value (confirmed on both products) distinct from fill.
+BURNED_AREA_PRODUCTS: Dict[str, Dict[str, str]] = {
+    "MCD64A1": {"short_name": "MCD64A1", "version": "061", "satellite_key": "modis"},
+    "VNP64A1": {"short_name": "VNP64A1", "version": "002", "satellite_key": "viirs"},
+}
+BURNED_AREA_FILL_VALUE = -1
+BURNED_AREA_WATER_VALUE = -2
+BURNED_AREA_OUTPUT_NODATA = 255
+
 # Default set of VIIRS platforms processed when config.surface_reflectance
 # does not specify `viirs_platforms`. Kept to ["snpp"] so that existing
 # configs continue to download exactly what they did before NOAA-20/21
 # support was added -- multi-platform download is opt-in only.
 VIIRS_DEFAULT_PLATFORMS = ["snpp"]
 VIIRS_ALL_PLATFORMS = ["snpp", "noaa20", "noaa21"]
+
+# MODIS has always processed both platforms unconditionally; this default
+# preserves that exact behavior for configs that don't select a subset.
+MODIS_DEFAULT_PLATFORMS = ["terra", "aqua"]
+MODIS_ALL_PLATFORMS = ["terra", "aqua"]
 
 # MOD09GA/MYD09GA.061: 500 m surface reflectance bands + required QA/state layers.
 MODIS_SR_BANDS = [f"sur_refl_b0{i}" for i in range(1, 8)]

@@ -6,17 +6,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from .activefire import _process_activefire, _resolve_firms_product_map
+from .burned_area import _process_burned_area
 from .config import (
     _as_bool,
     _load_config,
     _normalize_activefire_level,
     _normalize_activefire_satellites,
+    _extract_satellite_platform_overrides,
+    _normalize_buffer_km,
+    _normalize_burned_area_products,
     _normalize_date_list,
     _normalize_satellites,
     _resolve_runtime_path,
 )
 from .constants import DEFAULT_MAX_CLOUD_COVER, DEFAULT_OUTPUT_DIR, SENTINEL_COLLECTION
-from .geometry import _bbox_from_geometry, _load_aoi_geometry
+from .geometry import _bbox_from_geometry, _bbox_to_rectangle_geometry, _expand_bbox_by_meters, _load_aoi_geometry
 from .imagery import _infer_item_output_crs, _process_satellite_imagery, _search_stac_items
 from .surface_reflectance import (
     _process_modis_surface_reflectance,
@@ -39,6 +43,25 @@ def _viirs_product(config: Dict[str, Any]) -> str:
     if value not in VIIRS_PRODUCTS:
         raise ValueError(f"surface_reflectance.viirs_product must be one of {VIIRS_PRODUCTS} (got {value!r})")
     return value
+
+
+def _config_with_platform_override(
+    base_config: Dict[str, Any], family: str, platforms: Optional[List[str]]
+) -> Dict[str, Any]:
+    """Inject an explicit platform selection (from a qualified config.satellite
+    entry like 'modis-aqua') into a shallow copy of config.surface_reflectance.
+
+    Only overrides when `platforms` is non-empty; otherwise returns
+    `base_config` unchanged so surface_reflectance.py's own
+    surface_reflectance.{family}_platforms setting (or default) applies.
+    """
+    if not platforms:
+        return base_config
+    merged = dict(base_config)
+    sr_cfg = dict(merged.get("surface_reflectance", {}) or {})
+    sr_cfg[f"{family}_platforms"] = platforms
+    merged["surface_reflectance"] = sr_cfg
+    return merged
 
 
 def run_pipeline(
@@ -74,6 +97,7 @@ def run_pipeline(
         )
 
     satellites = _normalize_satellites(config["satellite"])
+    satellite_platform_overrides = _extract_satellite_platform_overrides(config["satellite"])
     firms_cfg = config.get("firms", {})
     img_only = _as_bool(config.get("img_only"), default=False)
 
@@ -98,8 +122,24 @@ def run_pipeline(
     else:
         activefire_targets = []
 
-    geometry_wgs84 = _load_aoi_geometry(geojson_path)
-    bbox = _bbox_from_geometry(geometry_wgs84)
+    original_geometry = _load_aoi_geometry(geojson_path)
+    original_bbox = _bbox_from_geometry(original_geometry)
+
+    buffer_km = _normalize_buffer_km(config.get("buffer_km"))
+    if buffer_km > 0:
+        effective_bbox = _expand_bbox_by_meters(original_bbox, buffer_km * 1000.0)
+        effective_geometry = _bbox_to_rectangle_geometry(effective_bbox)
+    else:
+        effective_bbox = original_bbox
+        effective_geometry = original_geometry
+
+    burned_area_products = _normalize_burned_area_products(config.get("burned_area"))
+
+    # activefire (FIRMS) intentionally keeps using the ORIGINAL geometry/bbox:
+    # firms.bbox_buffer_m is a separate, pre-existing buffer concept and is
+    # not affected by buffer_km.
+    geometry_wgs84 = original_geometry
+    bbox = original_bbox
 
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -108,6 +148,7 @@ def run_pipeline(
         end_date: date,
         *,
         include_activefire: bool = True,
+        include_burned_area: bool = True,
     ) -> Dict[str, Any]:
         if end_date < start_date:
             raise ValueError("endday must be greater than or equal to startday")
@@ -121,6 +162,9 @@ def run_pipeline(
                 "activefire_satellite": activefire_targets,
                 "output": str(output_root),
                 "img_only": img_only,
+                "buffer_km": buffer_km,
+                "original_bbox": list(original_bbox),
+                "effective_bbox": list(effective_bbox),
             }
         }
 
@@ -130,7 +174,7 @@ def run_pipeline(
                 config=config,
                 config_dir=config_dir,
                 output_root=output_root,
-                geometry_wgs84=geometry_wgs84,
+                geometry_wgs84=effective_geometry,
                 start_date=start_date,
                 end_date=end_date,
                 satellite_key="sentinel2",
@@ -143,7 +187,7 @@ def run_pipeline(
                 config=config,
                 config_dir=config_dir,
                 output_root=output_root,
-                geometry_wgs84=geometry_wgs84,
+                geometry_wgs84=effective_geometry,
                 start_date=start_date,
                 end_date=end_date,
                 satellite_key="landsat89",
@@ -153,11 +197,11 @@ def run_pipeline(
         if "modis" in satellites:
             LOGGER.info("Processing MODIS surface reflectance... (%s-%s)", start_date, end_date)
             summary["modis_surface_reflectance"] = _process_modis_surface_reflectance(
-                config=config,
+                config=_config_with_platform_override(config, "modis", satellite_platform_overrides.get("modis")),
                 config_dir=config_dir,
                 output_root=output_root,
-                geometry_wgs84=geometry_wgs84,
-                bbox=bbox,
+                geometry_wgs84=effective_geometry,
+                bbox=effective_bbox,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -168,7 +212,7 @@ def run_pipeline(
 
             LOGGER.info("Processing VIIRS L2 swath surface reflectance... (%s-%s)", start_date, end_date)
             summary["viirs_l2_swath"] = _process_viirs_l2_swath(
-                config=config,
+                config=_config_with_platform_override(config, "viirs", satellite_platform_overrides.get("viirs")),
                 config_dir=config_dir,
                 output_root=output_root,
                 geometry_wgs84=geometry_wgs84,
@@ -179,13 +223,26 @@ def run_pipeline(
         elif "viirs" in satellites:
             LOGGER.info("Processing VIIRS surface reflectance... (%s-%s)", start_date, end_date)
             summary["viirs_surface_reflectance"] = _process_viirs_surface_reflectance(
+                config=_config_with_platform_override(config, "viirs", satellite_platform_overrides.get("viirs")),
+                config_dir=config_dir,
+                output_root=output_root,
+                geometry_wgs84=effective_geometry,
+                bbox=effective_bbox,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        if burned_area_products and include_burned_area:
+            LOGGER.info("Processing burned area %s... (%s-%s)", burned_area_products, start_date, end_date)
+            summary["burned_area"] = _process_burned_area(
                 config=config,
                 config_dir=config_dir,
                 output_root=output_root,
-                geometry_wgs84=geometry_wgs84,
-                bbox=bbox,
+                geometry_wgs84=effective_geometry,
                 start_date=start_date,
                 end_date=end_date,
+                products=burned_area_products,
+                buffer_km=buffer_km,
             )
 
         if "gcomc" in satellites:
@@ -254,6 +311,7 @@ def run_pipeline(
             start_date,
             end_date,
             include_activefire=False,
+            include_burned_area=False,
         )
         runs.append(run_summary)
 
@@ -266,6 +324,25 @@ def run_pipeline(
     combined_start = min(start_dates)
     combined_end = max(end_dates)
     activefire_summary: Optional[Dict[str, Any]] = None
+    burned_area_summary: Optional[Dict[str, Any]] = None
+
+    if burned_area_products:
+        LOGGER.info(
+            "Processing burned area %s for combined range... (%s-%s)",
+            burned_area_products,
+            combined_start,
+            combined_end,
+        )
+        burned_area_summary = _process_burned_area(
+            config=config,
+            config_dir=config_dir,
+            output_root=output_root,
+            geometry_wgs84=effective_geometry,
+            start_date=combined_start,
+            end_date=combined_end,
+            products=burned_area_products,
+            buffer_km=buffer_km,
+        )
 
     if not img_only and activefire_targets:
         if not activefire_crs_ref:
@@ -308,9 +385,16 @@ def run_pipeline(
             "activefire_satellite": activefire_targets,
             "output": str(output_root),
             "img_only": img_only,
+            "buffer_km": buffer_km,
+            "original_bbox": list(original_bbox),
+            "effective_bbox": list(effective_bbox),
         },
         "total_runs": len(runs),
         "activefire_range": {
+            "startday": combined_start.strftime("%Y%m%d"),
+            "endday": combined_end.strftime("%Y%m%d"),
+        },
+        "burned_area_range": {
             "startday": combined_start.strftime("%Y%m%d"),
             "endday": combined_end.strftime("%Y%m%d"),
         },
@@ -319,6 +403,9 @@ def run_pipeline(
 
     if activefire_summary is not None:
         result["activefire"] = activefire_summary
+
+    if burned_area_summary is not None:
+        result["burned_area"] = burned_area_summary
 
     return result
 

@@ -1,0 +1,4 @@
+# Frozen manifests / task lists are verified by SHA-256: keep their bytes
+# identical on every checkout (no CRLF conversion on Windows).
+config/*.json -text
+config/*.csv -text

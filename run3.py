@@ -1,392 +1,532 @@
-"""Selective VIIRS Surface Reflectance downloader driven by the authoritative
-required-date plan (config/viirs_required_dates_daily.csv).
+"""VIIRS L2 swath images for the research: raw SR/geolocation recovery + 375/750 m grid generation.
 
-This module deliberately does not alter run.py, run2.py, the default
-config, or the shared pipeline. Its input is a fixed CSV of
-(region, date) rows produced by an external production daily-pair audit;
-run3.py never infers, expands, or substitutes dates on its own. Each
-required (region, date) row is processed as an exact single-day request per
-platform -- there is no min(date)..max(date) range download.
+Official VIIRS entry point (MODIS = run2.py, SGLI = run4.py). Product: daytime
+L2 Surface Reflectance swath VNP09 (S-NPP) / VJ109 (NOAA-20) / VJ209 (NOAA-21),
+collection 002, with the exact IMG/MOD geolocation named in each SR InputPointer.
+I bands go to the fixed 375 m and M bands / QF1-QF7 / land_water_mask to the fixed
+750 m equal-area Sinusoidal analysis grid by surface-distance nearest neighbour
+(src/viirs_l2.py, the algorithm the research pipeline ported verbatim). This is NOT
+the old Daily L2G (VNP09GA, ~463 m / ~926 m) product.
+
+Plan (no date is inferred): config/viirs_required_dates_daily.csv x 3 platforms (423 tasks),
+frozen per task in config/viirs_run3_acquisitions.json (src/viirs_plan.py). By default only the 344
+tasks the research uses as PRE/POST (config/viirs_research_required_tasks.csv) are processed;
+--all-plan-tasks takes all 423.
+
+Official extent: AOI bbox + 13 km halo on the fixed 375/750 m grid -- one window per region, independent
+of date, platform and training patches. Official layout (daily products only; per-overpass intermediates
+are written only with --keep-overpass):
+  <output-root>/<region>/<YYYY>/surface_reflectance/<platform>/{375m,750m,qa,geometry,provenance}/
+      <SR>_<platform>_<YYYYMMDD>_daily_<group>.tif
+  <output-root>/<region>/<YYYY>/surface_reflectance/<platform>/summary/<SR>_<platform>_<YYYYMMDD>.json
+
+Modes (exactly one; --dry-run is the default):
+
+  --dry-run    Locate every raw file of the 423 tasks (raw root / existing roots).
+               No network, no writes. --verify-raw also opens every header
+               (schema, DayNightFlag=DAY, InputPointer pairing, orbit/time).
+  --download   Fetch only MISSING raw files by exact granule name (CMR exact-name
+               lookup, .part -> size + signature check -> rename), then verify them.
+               Never overwrites, never deletes. --copy-existing also copies (not
+               moves) files found under --existing-root into the raw root.
+  --reproduce  Generate overpass + daily products of every ready task into
+               --output-root. Existing outputs are left alone.
+  --verify     Check --output-root against the grid/QA/band spec; with
+               --reference-root compare pixels with another output tree; with
+               --research-scenes compare daily products with research scene.npz.
+
+Reports (timestamped JSON, never overwritten): <raw-root>/_run3_reports/ (download),
+<output-root>/_run3_reports/ (reproduce, verify).
+
+Examples:
+  python run3.py --raw-root <VIIRS_RAW_ROOT> --existing-root <old>/{region}/viirs/_raw_l2
+  python run3.py --download --raw-root <VIIRS_RAW_ROOT>
+  python run3.py --reproduce --raw-root <VIIRS_RAW_ROOT> --output-root <new dir>
+  python run3.py --verify --output-root <dir> [--research-scenes <dataset/scenes>]
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import logging
+import math
+import os
+import shutil
 import sys
-from collections import defaultdict
-from datetime import date
+from collections import Counter
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
-# Reuse run2.py's already-verified MODIS/VIIRS sinusoidal halo geometry
-# unchanged (VIIRS VNP09GA/VJ109GA/VJ209GA share the exact same sinusoidal
-# grid and 500 m native pixel size as MODIS -- see src/constants.py). This
-# module must not modify run2.py.
-import run2
+from src.raster_compare import compare_aligned
+from src.regions import REGION_GEOJSONS
+from src.viirs_plan import (
+    DEFAULT_HALO_M, DEFAULT_MANIFEST_PATH, PLATFORMS, SR_PRODUCT_BY_PLATFORM, STATUS_NO_GRANULE,
+    load_acquisition_manifest, load_required_tasks, load_research_required_tasks, validate_required_tasks,
+)
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("run3")
 
-REQUIRED_DATES_CSV = Path("config/viirs_required_dates_daily.csv")
+RAW_ROOT_ENV = "VIIRS_L2_RAW_ROOT"
+OUTPUT_ROOT_ENV = "VIIRS_OUTPUT_ROOT"
+REPORT_DIR = "_run3_reports"
 
-REGION_GEOJSONS: Dict[str, str] = {
-    "region01": "config/no1.geojson",
-    "region03": "config/no3.geojson",
-    "region04": "config/no4.geojson",
-    "region05": "config/no5.geojson",
-    "region06": "config/no6.geojson",
-    "region07": "config/no7.geojson",
-    "region08": "config/no8.geojson",
-    "region09": "config/no9.geojson",
+T_NO_GRANULE = "NO_GRANULE"
+T_READY = "READY"
+T_MISSING = "MISSING_RAW"
+T_SPLIT = "RAW_SPLIT_ACROSS_ROOTS"
+T_INVALID = "RAW_INVALID"
+T_GENERATED = "GENERATED"
+T_ALREADY = "ALREADY_PRESENT"
+T_PARTIAL = "PARTIAL_OUTPUT_PRESENT"
+T_FAILED = "FAILED"
+T_SPEC_OK = "SPEC_OK"
+T_SPEC_BAD = "SPEC_MISMATCH"
+T_NO_OUTPUT = "OUTPUT_MISSING"
+
+# group -> (grid, band count, dtype); the layout written by src.viirs_l2.write_product
+EXPECTED_GROUPS = {
+    "375m": ("375m", 3, "float32"), "750m": ("750m", 9, "float32"), "qa": ("750m", 8, "uint8"),
+    "qa_375m": ("375m", 1, "uint8"), "geometry_375m": ("375m", 4, "float32"), "geometry_750m": ("750m", 4, "float32"),
+    "provenance_375m": ("375m", 5, "float64"), "provenance_750m": ("750m", 5, "float64"),
 }
-FORBIDDEN_REGIONS = ("region02", "region10")
-
-PLATFORMS: Tuple[str, ...] = ("snpp", "noaa20", "noaa21")
-PRODUCT_BY_PLATFORM: Dict[str, str] = {
-    "snpp": "VNP09GA",
-    "noaa20": "VJ109GA",
-    "noaa21": "VJ209GA",
-}
-PRODUCT_VERSION = "002"
-
-# Same native-pixel halo requirement as the MODIS run2.py plan, applied to
-# VIIRS's identical sinusoidal 500 m grid (per user decision: reuse the
-# MODIS value rather than inventing a new one).
-HALO_PIXELS = run2.HALO_PIXELS
-DEFAULT_HALO_BUFFER_M = run2.DEFAULT_HALO_BUFFER_M
-
-EXPECTED_REQUIRED_REGION_DATE_TASKS = 141
-EXPECTED_PLATFORM_REGION_DATE_TASKS = EXPECTED_REQUIRED_REGION_DATE_TASKS * len(PLATFORMS)
-
-# Assigned lazily so --dry-run and CSV validation stay dependency-free.
-_process_platform = None
+# Research Basic9 channels 0..6 (physical reflectance) -> (our grid, band index); NDVI_01/NBR_01 are research-side.
+RESEARCH_BANDS = (("I1", "375m", 0), ("I2", "375m", 1), ("M3", "750m", 2), ("M4", "750m", 3), ("M8", "750m", 6),
+                  ("I3", "375m", 2), ("M11", "750m", 8))
 
 
-def _load_runtime_worker() -> None:
-    global _process_platform
-    if _process_platform is not None:
-        return
-    from src.surface_reflectance import _process_platform as platform_worker
+class OfflineClient:
+    """Stands in for LAADSClient during --reproduce: any network use is a bug."""
 
-    _process_platform = platform_worker
+    def search(self, *a, **k):
+        raise RuntimeError("network access attempted in offline reproduction")
 
-
-def load_required_tasks(csv_path: Path = REQUIRED_DATES_CSV) -> Dict[str, List[str]]:
-    """Read config/viirs_required_dates_daily.csv: the sole date authority.
-
-    Returns {region: [date, ...]} (dates as "YYYY-MM-DD" strings, sorted).
-    Raises if the file is missing, malformed, contains a forbidden region,
-    or contains a duplicate (region, date) pair. Never infers dates from
-    anything else.
-    """
-    if not csv_path.is_file():
-        raise FileNotFoundError(
-            f"Authoritative VIIRS required-date plan not found: {csv_path}. "
-            "This file must be copied in from the daily-pair audit before run3.py can run."
-        )
-
-    with csv_path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames != ["region", "date"]:
-            raise ValueError(
-                f"{csv_path}: expected header 'region,date', got {reader.fieldnames}"
-            )
-        rows = list(reader)
-
-    seen: set[Tuple[str, str]] = set()
-    tasks: Dict[str, List[str]] = defaultdict(list)
-    for row in rows:
-        region = row["region"].strip()
-        date_text = row["date"].strip()
-        run2._parse_plan_date(date_text)  # raises ValueError if malformed
-
-        if region in FORBIDDEN_REGIONS:
-            raise ValueError(
-                f"{csv_path}: {region} is explicitly out of scope for this run "
-                "(no 2024 burn events) but appears in the required-date plan"
-            )
-        if region not in REGION_GEOJSONS:
-            raise ValueError(f"{csv_path}: unknown region '{region}' has no configured GeoJSON")
-
-        key = (region, date_text)
-        if key in seen:
-            raise ValueError(f"{csv_path}: duplicate (region, date) row: {key}")
-        seen.add(key)
-        tasks[region].append(date_text)
-
-    for region in tasks:
-        tasks[region].sort()
-
-    return dict(tasks)
+    find_by_name = fetch = search
 
 
-def validate_required_tasks(tasks: Mapping[str, Sequence[str]]) -> Dict[str, int]:
-    """Assert the required-date plan matches the audited totals exactly."""
-    if set(tasks) != set(REGION_GEOJSONS):
-        raise AssertionError(
-            f"Required-date plan regions {sorted(tasks)} do not match the expected "
-            f"8-region set {sorted(REGION_GEOJSONS)}"
-        )
-
-    total = sum(len(dates) for dates in tasks.values())
-    if total != EXPECTED_REQUIRED_REGION_DATE_TASKS:
-        raise AssertionError(
-            f"Expected {EXPECTED_REQUIRED_REGION_DATE_TASKS} region-date tasks, got {total}"
-        )
-
-    platform_total = total * len(PLATFORMS)
-    if platform_total != EXPECTED_PLATFORM_REGION_DATE_TASKS:
-        raise AssertionError(
-            f"Expected {EXPECTED_PLATFORM_REGION_DATE_TASKS} platform-region-date tasks, "
-            f"got {platform_total}"
-        )
-
-    return {"region_date_tasks": total, "platform_region_date_tasks": platform_total}
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
 
 
-def default_output_root() -> Path:
-    import os
-
-    host_data = Path(os.environ.get("SATDL_HOST_DATA_PATH", "/host_data"))
-    return host_data / "aoi_rectangle" / "output_viirs_selective"
-
-
-def _runtime_config() -> Dict[str, Any]:
-    return {
-        "file_exists": "skip",
-        "surface_reflectance": {
-            "clip_to_aoi": True,
-            "products": {"viirs": {"version": PRODUCT_VERSION}},
-        },
-    }
+def _write_report(directory: Path, mode: str, report: Dict[str, Any]) -> Path:
+    path = directory / REPORT_DIR / f"run3_{mode}_{_stamp()}.json"
+    if path.exists():
+        raise FileExistsError(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return path
 
 
-def _region_halo(region: str) -> Dict[str, Any]:
-    geojson_path = (Path.cwd() / REGION_GEOJSONS[region]).resolve()
-    geometry = run2._load_geojson_geometry(geojson_path)
-    return run2.build_halo_context(geometry, DEFAULT_HALO_BUFFER_M)
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
 
 
-def _print_pre_download_report(tasks: Dict[str, List[str]]) -> None:
-    totals = validate_required_tasks(tasks)
-    print("REQUIRED_DATE_FILE:", REQUIRED_DATES_CSV)
-    print("REQUIRED_REGION_DATE_TASKS =", totals["region_date_tasks"])
-    print("PLATFORMS =", ",".join(PLATFORMS))
-    print("EXPECTED_PLATFORM_REGION_DATE_TASKS =", totals["platform_region_date_tasks"])
-    print()
-    for region in sorted(tasks):
-        dates = tasks[region]
-        print(f"{region} ({len(dates)}): {', '.join(dates)}")
+def _region_geometry(region: str) -> Dict[str, Any]:
+    from src.halo_context import load_geojson_geometry
+
+    return load_geojson_geometry(Path(__file__).resolve().parent / REGION_GEOJSONS[region])
 
 
-def _print_dry_run(tasks: Dict[str, List[str]], regions: Sequence[str]) -> None:
-    _print_pre_download_report(tasks)
-    print()
-    print("Halo contract (per region, native VIIRS 500m sinusoidal grid):")
-    for region in regions:
-        halo = _region_halo(region)
-        print(f"\n{region}: {REGION_GEOJSONS[region]}")
-        print(f"  halo buffer: {DEFAULT_HALO_BUFFER_M:.0f} m, halo_pixels >= {HALO_PIXELS}")
-        print(f"  original AOI bbox (WGS84): {halo['original_bbox_wgs84']}")
-        print(f"  buffered source bbox (WGS84, sent to CMR): {halo['halo_bbox_wgs84']}")
-        print(f"  native bounds: {halo['original_native_bounds']} -> {halo['halo_native_bounds']}")
-        print(f"  minimum native halo pixels achieved: {halo['minimum_native_halo_pixels']:.3f}")
-        print(f"  dates ({len(tasks[region])}): {', '.join(tasks[region])}")
-        print(f"  platforms: {', '.join(PLATFORMS)}")
-        print(f"  output: {default_output_root() / region / 'viirs' / 'surface_reflectance'}")
+def _roots_for(region: str, raw_root: Optional[Path], existing: Sequence[str]) -> List[Path]:
+    return ([raw_root] if raw_root else []) + [Path(e.replace("{region}", region)) for e in existing]
 
 
-def _extra_tags(halo: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "aoi_bounds_wgs84": list(halo["original_bbox_wgs84"]),
-        "buffered_source_bounds_wgs84": list(halo["halo_bbox_wgs84"]),
-        "halo_pixels": halo["halo_pixels"],
-        "halo_m": halo["buffer_m"],
-    }
+def locate_task(task, roots: Sequence[Path]) -> Dict[str, Any]:
+    """Find every raw file of one task; a task is READY only when one root holds all of them."""
+    from src.viirs_l2 import raw_path
+
+    if task.status == STATUS_NO_GRANULE:
+        return {"status": T_NO_GRANULE, "raw_dir": None, "missing": []}
+    files = task.raw_files()
+    for root in roots:
+        if all(raw_path(root, n).is_file() for n in files):
+            return {"status": T_READY, "raw_dir": str(root), "missing": []}
+    found = {n for n in files for root in roots if raw_path(root, n).is_file()}
+    missing = [n for n in files if n not in found]
+    return {"status": T_MISSING if missing else T_SPLIT, "raw_dir": None, "missing": missing}
 
 
-def _run_one_task(
-    *, region: str, date_text: str, platform: str, halo: Dict[str, Any], region_output: Path
-) -> Dict[str, Any]:
-    _load_runtime_worker()
-    scene_date = run2._parse_plan_date(date_text)
-    short_name = PRODUCT_BY_PLATFORM[platform]
-    config = _runtime_config()
+def verify_raw_task(task, raw_dir: Path) -> List[str]:
+    """Header-level integrity of one task's raw files (no pixel reads)."""
+    from pyhdf.SD import SD, SDC
 
-    result = _process_platform(
-        config=config,
-        config_dir=Path.cwd(),
-        output_root=region_output,
-        geometry_wgs84=halo["halo_wgs84_geometry"],
-        bbox=halo["halo_bbox_wgs84"],
-        start_date=scene_date,
-        end_date=scene_date,
-        satellite_key="viirs",
-        platform_key=platform,
-        short_name=short_name,
-        version=PRODUCT_VERSION,
-        out_satellite_dir_name="viirs",
-        extra_tags=_extra_tags(halo),
-    )
+    from src import viirs_l2
 
-    date_token = scene_date.strftime("%Y%m%d")
-    if result.get("error"):
-        return {
-            "region": region,
-            "date": date_text,
-            "platform": platform,
-            "product": short_name,
-            "status": "failed",
-            "reason": result["error"],
-            "category": "network_or_auth_error",
-        }
-    for failed in result.get("dates_failed", []):
-        if failed["date"] == date_token:
-            return {
-                "region": region,
-                "date": date_text,
-                "platform": platform,
-                "product": short_name,
-                "status": "failed",
-                "reason": failed["error"],
-                "category": "processing_error",
-            }
-    for processed in result.get("dates_processed", []):
-        if processed["date"] == date_token:
-            return {
-                "region": region,
-                "date": date_text,
-                "platform": platform,
-                "product": short_name,
-                "status": "success",
-                "files": processed["files"],
-            }
-    if date_token in result.get("dates_skipped", []):
-        return {
-            "region": region,
-            "date": date_text,
-            "platform": platform,
-            "product": short_name,
-            "status": "missing_product",
-            "reason": "No CMR granules found for this exact date/platform; no nearest-date substitution performed",
-            "category": "missing_product",
-        }
-    return {
-        "region": region,
-        "date": date_text,
-        "platform": platform,
-        "product": short_name,
-        "status": "unknown",
-        "reason": f"Task not reflected in worker summary: {result}",
-        "category": "unknown",
-    }
+    p = viirs_l2.PLATFORMS[task.platform]
+    problems = []
+    for ov in task.overpasses:
+        for name, (img, mod) in zip(ov.granules, ov.geolocation):
+            path = viirs_l2.raw_path(raw_dir, name)
+            try:
+                hdf = SD(str(path), SDC.READ)
+                try:
+                    flag = str(hdf.attributes().get("DayNightFlag", "")).upper()
+                finally:
+                    hdf.end()
+                if flag != "DAY":
+                    problems.append(f"{name}: DayNightFlag {flag!r} != DAY")
+                sr = viirs_l2.read_sr_header(path, p)
+                if sr.orbit != ov.orbit:
+                    problems.append(f"{name}: orbit {sr.orbit} != {ov.orbit}")
+                if viirs_l2.pair_geolocation(sr, p, raw_dir) != (img, mod):
+                    problems.append(f"{name}: InputPointer geolocation differs from manifest {(img, mod)}")
+                viirs_l2.verify_pair(sr, viirs_l2.raw_path(raw_dir, img), viirs_l2.raw_path(raw_dir, mod))
+            except Exception as exc:
+                problems.append(f"{name}: {type(exc).__name__}: {exc}")
+    return problems
 
 
-def run_smoke_test(region: str, date_text: str) -> List[Dict[str, Any]]:
-    """Real download of exactly one region x one required date, all 3 platforms."""
-    halo = _region_halo(region)
-    region_output = default_output_root() / region
-    region_output.mkdir(parents=True, exist_ok=True)
-    return [
-        _run_one_task(region=region, date_text=date_text, platform=platform, halo=halo, region_output=region_output)
-        for platform in PLATFORMS
-    ]
+def _download_task(task, raw_root: Path, client) -> List[str]:
+    """Fetch the task's missing raw files into raw_root by exact name. Returns fetched names."""
+    from src import viirs_l2
+
+    p = viirs_l2.PLATFORMS[task.platform]
+    concept = {"09": p.sr_concept_id, "03IMG": p.img_concept_id, "03MOD": p.mod_concept_id}
+    fetched = []
+    for name in task.raw_files():
+        dest = viirs_l2.raw_path(raw_root, name)
+        if dest.exists():
+            continue
+        url = client.find_by_name(concept[viirs_l2.parse_granule_name(name).kind], name)
+        if not url.endswith("/" + name):
+            raise viirs_l2.VIIRSPairingError(f"{name}: CMR URL {url} is not the exact granule")
+        client.fetch(url, dest)
+        fetched.append(name)
+    return fetched
 
 
-def run_full_download(tasks: Dict[str, List[str]], regions: Sequence[str]) -> Dict[str, Any]:
-    """Process every required (region, date) x platform task exactly once.
+def _copy_into(task, src_roots: Sequence[Path], raw_root: Path) -> List[str]:
+    from src.viirs_l2 import raw_path
 
-    Single coordinated process: tasks run sequentially region-by-region,
-    date-by-date, platform-by-platform. No range expansion is ever
-    performed -- each call requests exactly one (region, date) pair.
-
-    `tasks` is expected to already be validated (see validate_required_tasks);
-    `regions` may be the full set or an explicit subset for a partial run.
-    """
-    manifest: List[Dict[str, Any]] = []
-    for region in regions:
-        halo = _region_halo(region)
-        region_output = default_output_root() / region
-        region_output.mkdir(parents=True, exist_ok=True)
-        (region_output / "run3_halo_metadata.json").write_text(
-            json.dumps(_extra_tags(halo), ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-        for date_text in tasks[region]:
-            for platform in PLATFORMS:
-                LOGGER.info("%s %s %s (%s)", region, date_text, platform, PRODUCT_BY_PLATFORM[platform])
-                manifest.append(
-                    _run_one_task(
-                        region=region, date_text=date_text, platform=platform, halo=halo, region_output=region_output
-                    )
-                )
-
-    status_counts: Dict[str, int] = defaultdict(int)
-    for entry in manifest:
-        status_counts[entry["status"]] += 1
-
-    output_root = default_output_root()
-    output_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_root / "run3_failure_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-
-    return {
-        "total_tasks": len(manifest),
-        "status_counts": dict(status_counts),
-        "manifest_path": str(manifest_path),
-        "failed_or_missing": [e for e in manifest if e["status"] not in ("success",)],
-    }
+    copied = []
+    for name in task.raw_files():
+        dest = raw_path(raw_root, name)
+        src = next((raw_path(r, name) for r in src_roots if raw_path(r, name).is_file()), None)
+        if dest.exists() or src is None:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        shutil.copy2(src, part)
+        if part.stat().st_size != src.stat().st_size:
+            part.unlink()
+            raise OSError(f"copy of {name} is incomplete")
+        os.replace(part, dest)
+        copied.append(name)
+    return copied
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Print the plan without login, network, or writes.")
-    parser.add_argument(
-        "--pre-download-report", action="store_true", help="Print and assert required-task totals only."
-    )
-    parser.add_argument(
-        "--smoke-test",
-        nargs=2,
-        metavar=("REGION", "DATE"),
-        help="Real download of one region x one required date across all 3 platforms.",
-    )
-    parser.add_argument("--full", action="store_true", help="Run the full selective download (real, long-running).")
-    parser.add_argument("--regions", nargs="+", choices=tuple(REGION_GEOJSONS), help="Optional region subset.")
+def output_dir(output_root: Path, region: str, platform: str, year: str) -> Path:
+    """Official layout VIIRS/<region>/<year>/surface_reflectance/<platform>/ (daily products directly below)."""
+    return output_root / region / year / "surface_reflectance" / platform
+
+
+def _task_dir(output_root: Path, task) -> Path:
+    return output_dir(output_root, task.region, task.platform, task.date[:4])
+
+
+def _summary_path(output_root: Path, task) -> Path:
+    sr = SR_PRODUCT_BY_PLATFORM[task.platform]
+    return _task_dir(output_root, task) / "summary" / f"{sr}_{task.platform}_{task.date.replace('-', '')}.json"
+
+
+def _existing_outputs(output_root: Path, task) -> List[Path]:
+    token = f"_{task.platform}_{task.date.replace('-', '')}_"
+    base = _task_dir(output_root, task)
+    return list(base.rglob(f"*{token}*.tif")) if base.exists() else []
+
+
+def reproduce_task(task, raw_dir: Path, output_root: Path, halo_m: float, keep_overpass: bool = False) -> Dict[str, Any]:
+    from src import viirs_l2
+
+    geometry = _region_geometry(task.region)
+    window = viirs_l2.grid_window_for_geometry(geometry, halo_m)
+    entries = [(name, "", "DAY") for ov in task.overpasses for name in ov.granules]
+    summary = viirs_l2.process_platform_day(viirs_l2.PLATFORMS[task.platform], date.fromisoformat(task.date), entries,
+                                            raw_dir, OfflineClient(), geometry, window, output_root / task.region,
+                                            product_dir=_task_dir(output_root, task), write_overpass=keep_overpass)
+    got = sorted((o["orbit"], tuple(o["granules"])) for o in summary["overpasses"])
+    want = sorted((ov.orbit, ov.granules) for ov in task.overpasses)
+    if got != want:
+        raise RuntimeError(f"overpasses {got} differ from the frozen manifest {want}")
+    return summary
+
+
+def _grid_problems(ds, grid: str) -> List[str]:
+    from rasterio.crs import CRS
+
+    from src.constants import MODIS_SINUSOIDAL_X_MIN, MODIS_SINUSOIDAL_Y_MAX
+    from src.viirs_l2 import GRID_CELL_M, GRID_CRS, GRID_SNAP_M
+
+    cell, t, out = GRID_CELL_M[grid], ds.transform, []
+    if abs(t.a - cell) > 1e-9 or abs(t.e + cell) > 1e-9 or t.b or t.d:
+        out.append(f"pixel size {t.a}/{t.e} != {cell}")
+    for k in ((t.c - MODIS_SINUSOIDAL_X_MIN) / GRID_SNAP_M, (MODIS_SINUSOIDAL_Y_MAX - t.f) / GRID_SNAP_M):
+        if abs(k - round(k)) > 1e-6:
+            out.append(f"window origin ({t.c}, {t.f}) is not on the 750 m anchor lattice")
+    if ds.crs != CRS.from_string(GRID_CRS):
+        out.append(f"CRS {ds.crs.to_proj4()} != {GRID_CRS}")
+    return out
+
+
+def check_product_spec(files: Dict[str, Path], task) -> List[str]:
+    """Spec check of one daily/overpass product set (8 group files)."""
+    import numpy as np
+    import rasterio
+
+    from src.viirs_l2 import I_BANDS, M_BANDS, QA_NAMES
+
+    names = {"375m": I_BANDS, "750m": M_BANDS, "qa": QA_NAMES}
+    allowed = {g for ov in task.overpasses for g in ov.granules}
+    problems, extents = [], {}
+    for group, (grid, count, dtype) in EXPECTED_GROUPS.items():
+        path = files[group]
+        if not path.exists():
+            problems.append(f"{group}: missing")
+            continue
+        with rasterio.open(path) as ds:
+            extra = 1 if group.startswith("provenance") and ds.count == count + 1 else 0  # daily: selected_orbit
+            if ds.count - extra != count or set(ds.dtypes) != {dtype}:
+                problems.append(f"{group}: {ds.count} x {set(ds.dtypes)} != {count} x {dtype}")
+            if group in names and list(ds.descriptions) != list(names[group]):
+                problems.append(f"{group}: band order {ds.descriptions} != {names[group]}")
+            if dtype.startswith("float") and not (ds.nodata is not None and math.isnan(ds.nodata)):
+                problems.append(f"{group}: nodata {ds.nodata} is not NaN")
+            problems += [f"{group}: {p}" for p in _grid_problems(ds, grid)]
+            extents.setdefault(grid, (ds.transform.c, ds.transform.f, ds.width * ds.transform.a, ds.height * ds.transform.a))
+            tags = ds.tags()
+            if tags.get("platform") != task.platform:
+                problems.append(f"{group}: platform tag {tags.get('platform')} != {task.platform}")
+            if not set(json.loads(tags.get("source_granules", "[]"))) <= allowed:
+                problems.append(f"{group}: source_granules {tags.get('source_granules')} not in the manifest")
+            if group in ("375m", "750m"):
+                a = ds.read()
+                finite = a[np.isfinite(a)]
+                if finite.size and (finite.min() < -0.0101 or finite.max() > 1.6001):
+                    problems.append(f"{group}: reflectance outside [-0.01, 1.6]")
+    if len(extents) == 2 and any(abs(x - y) > 1e-6 for x, y in zip(extents["375m"], extents["750m"])):
+        problems.append(f"375 m and 750 m windows differ: {extents}")
+    return problems
+
+
+def _task_products(output_root: Path, task) -> Dict[str, Dict[str, Path]]:
+    """'<kind>:<stem>' -> {group: file} for every product listed in the task's summary."""
+    from src.viirs_l2 import GROUP_DIR
+
+    s = json.loads(_summary_path(output_root, task).read_text(encoding="utf-8"))
+    base = _task_dir(output_root, task)
+    listed = [f for o in s["overpasses"] for f in o["files"]] + (s["daily"]["files"] if s.get("daily") else [])
+    out: Dict[str, Dict[str, Path]] = {}
+    for f in map(Path, listed):
+        # daily: <platform>/<group dir>/<file>; overpass (only with --keep-overpass): <platform>/overpass/<group dir>/<file>
+        kind = "overpass" if f.parents[1].name == "overpass" else "daily"
+        root = base / "overpass" if kind == "overpass" else base
+        group = next(g for g in sorted(EXPECTED_GROUPS, key=len, reverse=True) if f.name.endswith(f"_{g}.tif"))
+        stem = f.name[: -len(f"_{group}.tif")]
+        out.setdefault(f"{kind}:{stem}", {g: root / GROUP_DIR[g] / f"{stem}_{g}.tif" for g in EXPECTED_GROUPS})
+    return out
+
+
+def compare_research_scene(daily: Dict[str, Path], scene_dir: Path) -> Dict[str, Any]:
+    """Our daily 375/750 m products vs a research scene.npz (Basic9; its M bands are 750 m values repeated 2x2)."""
+    import numpy as np
+    import rasterio
+
+    npz = np.load(scene_dir / "scene.npz", allow_pickle=False)
+    values, valid = npz["values"], npz["valid"]
+    with rasterio.open(daily["375m"]) as f, rasterio.open(daily["750m"]) as c:
+        fine, coarse, t375 = f.read(), c.read(), tuple(f.transform)[:6]
+    res = {"transform_equal": all(abs(p - q) < 1e-6 for p, q in zip(t375, npz["transform"])),
+           "shape_equal": tuple(fine.shape[1:]) == tuple(values.shape[1:])}
+    if not (res["transform_equal"] and res["shape_equal"]):
+        res["identical"] = False
+        return res
+    h, w = fine.shape[1:]
+    ours = np.stack([fine[i] if grid == "375m" else np.repeat(np.repeat(coarse[i], 2, 0), 2, 1)[:h, :w]
+                     for _, grid, i in RESEARCH_BANDS]).astype(np.float32)
+    our_valid = np.isfinite(ours).all(0)
+    res.update(valid_pixels_research=int(valid.sum()), valid_pixels_ours=int(our_valid.sum()),
+               valid_mask_equal=bool((our_valid == valid).all()),
+               mismatch_values_on_valid=int((ours[:, valid] != values[:7, valid]).sum()))
+    res["identical"] = res["valid_mask_equal"] and res["mismatch_values_on_valid"] == 0
+    return res
+
+
+def _verify(tasks, output_root: Path, reference_root: Optional[Path], research_scenes: Optional[Path]) -> List[Dict[str, Any]]:
+    rows = []
+    for t in tasks:
+        row: Dict[str, Any] = {"region": t.region, "platform": t.platform, "date": t.date}
+        rows.append(row)
+        if t.status == STATUS_NO_GRANULE:
+            row["status"] = T_NO_GRANULE
+            continue
+        if not _summary_path(output_root, t).exists():
+            row["status"] = T_NO_OUTPUT
+            continue
+        products = _task_products(output_root, t)
+        row["products"] = {k: check_product_spec(v, t) for k, v in products.items()}
+        row["status"] = T_SPEC_OK if not any(row["products"].values()) else T_SPEC_BAD
+        if reference_root:
+            cmp = {}
+            for k, files in products.items():
+                for g, p in files.items():
+                    ref = reference_root / p.relative_to(output_root)
+                    cmp[f"{k}:{g}"] = compare_aligned(p, ref) if ref.exists() else {"identical": False, "reference": "missing"}
+            row["reference"] = {"files": len(cmp), "identical": sum(c["identical"] for c in cmp.values()),
+                                "window_equal": sum(bool(c.get("window_equal")) for c in cmp.values()),
+                                "differs": {k: c for k, c in cmp.items() if not c["identical"]}}
+        if research_scenes:
+            scene = research_scenes / f"{t.region}_{t.platform}_{t.date}"
+            daily = [v for k, v in products.items() if k.startswith("daily:")]
+            if scene.is_dir() and daily:
+                row["research_scene"] = compare_research_scene(daily[0], scene)
+    return rows
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="locate raw files of every task (default)")
+    mode.add_argument("--download", action="store_true", help="fetch only MISSING raw files by exact name")
+    mode.add_argument("--reproduce", action="store_true", help="generate products of every ready task")
+    mode.add_argument("--verify", action="store_true", help="check --output-root")
+    parser.add_argument("--raw-root", type=Path, default=None,
+                        help=f"persistent raw root <product>/<YYYY>/<DOY>/<file> (or env {RAW_ROOT_ENV})")
+    parser.add_argument("--existing-root", action="append", default=[],
+                        help="extra read-only raw root, same layout; '{region}' is replaced by the task region; repeatable")
+    parser.add_argument("--copy-existing", action="store_true", help="with --download: copy (not move) existing files into --raw-root")
+    parser.add_argument("--verify-raw", action="store_true", help="with --dry-run: open every raw header and check it")
+    parser.add_argument("--output-root", type=Path, default=None, help=f"product root (or env {OUTPUT_ROOT_ENV})")
+    parser.add_argument("--reference-root", type=Path, default=None, help="--verify: read-only output tree to compare pixels with")
+    parser.add_argument("--research-scenes", type=Path, default=None,
+                        help="--verify: read-only research dataset/scenes dir (<region>_<platform>_<date>/scene.npz)")
+    parser.add_argument("--halo-m", type=float, default=DEFAULT_HALO_M, help="analysis window halo (default: research 13000 m)")
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--regions", nargs="+", choices=tuple(REGION_GEOJSONS))
+    parser.add_argument("--platforms", nargs="+", choices=PLATFORMS)
+    parser.add_argument("--dates", nargs="+", metavar="YYYY-MM-DD", help="restrict to these plan dates")
+    parser.add_argument("--all-plan-tasks", action="store_true",
+                        help="all 423 plan tasks (incl. region04) instead of the research-required tasks "
+                             "(config/viirs_research_required_tasks.csv, 344)")
+    parser.add_argument("--keep-overpass", action="store_true",
+                        help="--reproduce: also write the per-overpass products (default: daily products only)")
     args = parser.parse_args(argv)
-
+    mode_name = "download" if args.download else "reproduce" if args.reproduce else "verify" if args.verify else "dry_run"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    tasks = load_required_tasks()
-    regions = args.regions or sorted(tasks)
+    totals = validate_required_tasks(load_required_tasks())
+    tasks = [t for t in load_acquisition_manifest(args.manifest or DEFAULT_MANIFEST_PATH)
+             if (not args.regions or t.region in args.regions) and (not args.platforms or t.platform in args.platforms)
+             and (not args.dates or t.date in args.dates)]
+    if not args.all_plan_tasks:
+        required = load_research_required_tasks()
+        tasks = [t for t in tasks if (t.region, t.platform, t.date) in required]
+    raw_root = args.raw_root or (Path(os.environ[RAW_ROOT_ENV]) if os.environ.get(RAW_ROOT_ENV) else None)
+    output_root = args.output_root or (Path(os.environ[OUTPUT_ROOT_ENV]) if os.environ.get(OUTPUT_ROOT_ENV) else None)
+    if args.download and raw_root is None:
+        parser.error(f"--download needs --raw-root or {RAW_ROOT_ENV}")
+    if not args.verify and raw_root is None and not args.existing_root:
+        parser.error(f"--raw-root (or {RAW_ROOT_ENV}) or --existing-root is required; no default data root is assumed")
+    if (args.reproduce or args.verify) and output_root is None:
+        parser.error(f"--output-root or {OUTPUT_ROOT_ENV} is required for --{mode_name}")
+    others = [args.reference_root, args.research_scenes, raw_root] + [Path(e.split("{region}")[0]) for e in args.existing_root]
+    for other in filter(None, others):
+        if output_root and (args.reproduce or args.verify) and (_is_within(output_root, other) or _is_within(other, output_root)):
+            parser.error(f"output root must be separate from {other}")
+    if args.copy_existing and not args.download:
+        parser.error("--copy-existing is only valid with --download")
 
-    if args.pre_download_report:
-        _print_pre_download_report(tasks)
-        return 0
+    report: Dict[str, Any] = {
+        "mode": mode_name, "plan": totals, "tasks_in_scope": len(tasks), "halo_m": args.halo_m,
+        "scope": "all_plan_tasks" if args.all_plan_tasks else "research_required (config/viirs_research_required_tasks.csv)",
+        "layout": "<output-root>/<region>/<YYYY>/surface_reflectance/<platform>/{375m,750m,qa,geometry,provenance,summary}",
+        "product": "VIIRS L2 swath SR VNP09/VJ109/VJ209 collection 002 + VNP03/VJ103/VJ203 IMG/MOD geolocation",
+        "raw_root": str(raw_root) if raw_root else None, "existing_roots": args.existing_root,
+        "output_root": str(output_root) if output_root else None, "network_used": bool(args.download),
+    }
 
-    if args.dry_run:
-        _print_dry_run(tasks, regions)
-        return 0
+    if args.verify:
+        rows = _verify(tasks, output_root, args.reference_root, args.research_scenes)
+        report["status_counts"] = dict(Counter(r["status"] for r in rows))
+        if args.reference_root:
+            refd = [r["reference"] for r in rows if "reference" in r]
+            report["reference_compare"] = {k: sum(r[k] for r in refd) for k in ("files", "identical", "window_equal")}
+        scenes = [r["research_scene"] for r in rows if "research_scene" in r]
+        if args.research_scenes:
+            report["research_scene_compare"] = {"scenes": len(scenes), "identical": sum(s["identical"] for s in scenes)}
+        report["tasks"] = rows
+        path = _write_report(output_root, mode_name, report)
+        print(json.dumps({k: v for k, v in report.items() if k != "tasks"}, ensure_ascii=False, indent=2))
+        print("report:", path)
+        return 1 if any(r["status"] == T_SPEC_BAD for r in rows) or any(not s["identical"] for s in scenes) else 0
 
-    if args.smoke_test:
-        region, date_text = args.smoke_test
-        if region not in REGION_GEOJSONS:
-            parser.error(f"Unknown region for --smoke-test: {region}")
-        if date_text not in tasks.get(region, []):
-            parser.error(f"{date_text} is not a required date for {region} in {REQUIRED_DATES_CSV}")
-        results = run_smoke_test(region, date_text)
-        print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
-        return 0 if all(r["status"] == "success" for r in results) else 1
+    rows: List[Dict[str, Any]] = []
+    client = None
+    for t in tasks:
+        roots = _roots_for(t.region, raw_root, args.existing_root)
+        row = {"region": t.region, "platform": t.platform, "date": t.date, "orbits": [o.orbit for o in t.overpasses],
+               "raw_files": t.raw_files(), **locate_task(t, roots)}
+        rows.append(row)
+        try:
+            if args.download and args.copy_existing and row["status"] != T_NO_GRANULE:
+                row["copied"] = _copy_into(t, roots[1:], raw_root)
+            if args.download and row["status"] in (T_MISSING, T_SPLIT):
+                if client is None:
+                    from src.surface_reflectance import _earthdata_login
+                    from src.viirs_l2 import LAADSClient
 
-    if args.full:
-        validate_required_tasks(tasks)
-        summary = run_full_download(tasks, regions)
-        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
-        return 0
+                    _earthdata_login({}, Path.cwd())
+                    client = LAADSClient()
+                row["downloaded"] = _download_task(t, raw_root, client)
+            if args.download and (row.get("copied") or row.get("downloaded")):
+                row.update(locate_task(t, [raw_root]))
+                if row["status"] == T_READY:
+                    row["raw_problems"] = verify_raw_task(t, raw_root)
+            if (args.verify_raw or args.reproduce) and row["status"] == T_READY:
+                row["raw_problems"] = verify_raw_task(t, Path(row["raw_dir"]))
+            if row.get("raw_problems"):
+                row["status"] = T_INVALID
+        except Exception as exc:
+            LOGGER.error("%s %s %s: %s", t.region, t.platform, t.date, exc)
+            row.update(status=T_FAILED, error=str(exc))
+            continue
 
-    parser.print_help()
-    return 1
+        if not args.reproduce or row["status"] != T_READY:
+            continue
+        if _summary_path(output_root, t).exists():
+            row["status"] = T_ALREADY
+            continue
+        if _existing_outputs(output_root, t):
+            row["status"] = T_PARTIAL
+            continue
+        try:
+            s = reproduce_task(t, Path(row["raw_dir"]), output_root, args.halo_m, args.keep_overpass)
+            row["status"] = T_GENERATED
+            row["overpasses"] = [{k: o[k] for k in ("orbit", "granules", "geolocation", "start_utc", "end_utc", "aoi_status",
+                                                     "aoi_valid_fraction_375m", "files")} for o in s["overpasses"]]
+            row["daily"] = s["daily"]
+        except Exception as exc:
+            LOGGER.error("%s %s %s: %s", t.region, t.platform, t.date, exc, exc_info=True)
+            row.update(status=T_FAILED, error=str(exc))
+
+    report["status_counts"] = dict(Counter(r["status"] for r in rows))
+    report["missing_raw_files"] = sorted({m for r in rows for m in r.get("missing", [])})
+    report["tasks"] = rows
+    path = None
+    if args.download:
+        path = _write_report(raw_root, mode_name, report)
+    elif args.reproduce:
+        path = _write_report(output_root, mode_name, report)
+    print(json.dumps({k: v for k, v in report.items() if k not in ("tasks", "missing_raw_files")}, ensure_ascii=False, indent=2))
+    print("missing raw files:", len(report["missing_raw_files"]))
+    if path:
+        print("report:", path)
+    bad = {T_FAILED, T_INVALID, T_PARTIAL} | ({T_MISSING, T_SPLIT} if args.download else set())
+    return 1 if any(r["status"] in bad for r in rows) else 0
 
 
 if __name__ == "__main__":

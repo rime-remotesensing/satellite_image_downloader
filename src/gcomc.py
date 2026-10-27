@@ -35,7 +35,7 @@ from rasterio.features import bounds as geometry_bounds, geometry_mask
 from rasterio.transform import Affine
 from rasterio.warp import transform_geom
 
-from .config import _load_env_kv_file, _resolve_runtime_path
+from .config import _load_env_kv_file, _normalize_spatial_export, _resolve_runtime_path
 from .network_retry import call_with_network_retry
 from .surface_reflectance import _aoi_bbox_geometry_in_crs
 
@@ -954,17 +954,29 @@ def process_date(
     out_dir: Path,
     *,
     clip_to_aoi: bool = True,
+    halo_m: float = 0.0,
 ) -> Dict[str, Any]:
-    """Mosaic available tiles per native grid, crop to the AOI bbox, classify AOI status and write GeoTIFFs.
+    """Mosaic available tiles per native grid, crop to the AOI bbox (+halo_m), classify AOI status and write GeoTIFFs.
 
     Writes nothing but the date summary when the AOI has no observed pixel.
+    clip_to_aoi=False (native_rect_halo mode) keeps every real native pixel
+    in the cropped window; it is never AOI-polygon NaN-masked. halo_m only
+    widens the cropped window -- it never changes the AOI mask used for the
+    aoi_status/observed-fraction classification above, which always reflects
+    the true (unbuffered) AOI.
     """
     available = {k: p for k, p in products.items() if p.status == PRODUCT_AVAILABLE}
     tile_files = {k: p.local_path for k, p in available.items()}
     crs = eqa_crs()
     bbox_geom = _aoi_bbox_geometry_in_crs(geometry_wgs84, crs)
     bbox_bounds = geometry_bounds(bbox_geom)
-    windows = {grid: native_window_for_bounds(bbox_bounds, grid) for grid in GCOMC_TILE_PIXELS}
+    crop_bounds = bbox_bounds
+    if halo_m > 0:
+        crop_bounds = (
+            bbox_bounds[0] - halo_m, bbox_bounds[1] - halo_m,
+            bbox_bounds[2] + halo_m, bbox_bounds[3] + halo_m,
+        )
+    windows = {grid: native_window_for_bounds(crop_bounds, grid) for grid in GCOMC_TILE_PIXELS}
 
     qa = read_mosaic(windows["250m"], _QA_FIELD, tile_files)
     aoi_mask_250 = aoi_pixel_mask(windows["250m"], geometry_wgs84)
@@ -1101,6 +1113,21 @@ def _gportal_username(config: Dict[str, Any], config_dir: Path) -> str:
     return os.environ.get("GPORTAL_USERNAME") or _load_env_kv_file(env_path).get("GPORTAL_USERNAME", "")
 
 
+def _resolve_gcomc_spatial_export(config: Dict[str, Any]) -> Tuple[bool, float]:
+    """(clip_to_aoi, halo_m) for process_date(), from surface_reflectance.spatial_export.
+
+    halo_m is only ever non-zero in native_rect_halo mode -- in aoi_clip mode
+    (including when spatial_export is omitted) it is always 0.0, since a
+    halo that gets masked straight back off by the AOI polygon would be
+    wasted search/tile-fetch effort for no visible effect.
+    """
+    sr_cfg = config.get("surface_reflectance", {}) or {}
+    spatial_export = _normalize_spatial_export(sr_cfg.get("spatial_export"))
+    clip_to_aoi = spatial_export["mode"] != "native_rect_halo"
+    halo_m = (spatial_export["halo_m"] or 0.0) if not clip_to_aoi else 0.0
+    return clip_to_aoi, halo_m
+
+
 def _process_gcomc_surface_reflectance(
     config: Dict[str, Any],
     config_dir: Path,
@@ -1120,7 +1147,19 @@ def _process_gcomc_surface_reflectance(
         raise ValueError("config.file_exists must be 'overwrite' or 'skip'")
     out_dir = output_root / "gcomc" / "rsrf"
     raw_dir = _resolve_raw_dir(config, config_dir, output_root)
-    tiles = tiles_for_geometry(geometry_wgs84)
+
+    gcomc_clip_to_aoi, gcomc_halo_m = _resolve_gcomc_spatial_export(config)
+
+    # Expand the tile search by the same halo so a halo that crosses an EQA
+    # tile boundary still fetches the adjacent tile, not just the AOI's own.
+    tile_search_geometry = geometry_wgs84
+    if gcomc_halo_m > 0:
+        from .geometry import _bbox_to_rectangle_geometry, _expand_bbox_by_meters
+
+        tile_search_geometry = _bbox_to_rectangle_geometry(
+            _expand_bbox_by_meters(geometry_bounds(geometry_wgs84), gcomc_halo_m)
+        )
+    tiles = tiles_for_geometry(tile_search_geometry)
     summary: Dict[str, Any] = {
         "product": "L2.LAND.RSRF", "version": GCOMC_RSRF_PRODUCT_VERSION, "orbit_direction": GCOMC_ORBIT_DIRECTION,
         "tiles": [f"T{v:02d}{h:02d}" for v, h in tiles], "raw_dir": str(raw_dir),
@@ -1195,7 +1234,10 @@ def _process_gcomc_surface_reflectance(
                 summary["dates_request_required"].append({"date": token, "products": {k: v.to_dict() for k, v in products.items()}})
                 continue
             try:
-                day = process_date(d, products, geometry_wgs84, out_dir)
+                day = process_date(
+                    d, products, geometry_wgs84, out_dir,
+                    clip_to_aoi=gcomc_clip_to_aoi, halo_m=gcomc_halo_m,
+                )
             except GCOMCError as exc:
                 LOGGER.error("GCOM-C/SGLI %s: %s", token, exc)
                 summary["dates_failed"].append({"date": token, "error": str(exc)})

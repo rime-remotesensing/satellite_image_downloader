@@ -22,7 +22,8 @@ from rasterio.warp import transform_geom
 from rasterio.windows import Window, from_bounds
 from rasterio.windows import transform as window_transform
 
-from .config import _as_bool, _load_env_kv_file, _resolve_runtime_path
+from .config import _as_bool, _load_env_kv_file, _normalize_spatial_export, _resolve_runtime_path
+from .geometry import _bbox_from_geometry, _bbox_to_rectangle_geometry, _expand_bbox_by_meters
 from .network_retry import call_with_network_retry
 from .constants import (
     MODIS_QA_BANDS,
@@ -32,6 +33,8 @@ from .constants import (
     MODIS_SINUSOIDAL_Y_MAX,
     MODIS_SR_BANDS,
     MODIS_TILE_SIZE_M,
+    MODIS_ALL_PLATFORMS,
+    MODIS_DEFAULT_PLATFORMS,
     VIIRS_ALL_PLATFORMS,
     VIIRS_DEFAULT_PLATFORMS,
     VIIRS_QA_BANDS,
@@ -572,11 +575,17 @@ def _process_date_for_platform(
     aoi_geom_wgs84: Dict[str, Any],
     file_exists_mode: str,
     extra_tags: Optional[Dict[str, Any]] = None,
+    halo_m: float = 0.0,
+    mask_outside_aoi: bool = True,
 ) -> Dict[str, Any]:
     field_specs = _FIELD_SPECS[satellite_key]
     crs = _sinusoidal_crs()
+    crop_geom_wgs84 = aoi_geom_wgs84
+    if clip_to_aoi and halo_m > 0:
+        expanded_bbox = _expand_bbox_by_meters(_bbox_from_geometry(aoi_geom_wgs84), halo_m)
+        crop_geom_wgs84 = _bbox_to_rectangle_geometry(expanded_bbox)
     aoi_bbox_native = (
-        _aoi_bbox_geometry_in_crs(aoi_geom_wgs84, crs)
+        _aoi_bbox_geometry_in_crs(crop_geom_wgs84, crs)
         if clip_to_aoi
         else None
     )
@@ -612,14 +621,20 @@ def _process_date_for_platform(
             window, out_transform = _crop_window(mosaic_transform, height, width, aoi_bbox_native)
             mosaic_array = _apply_window(mosaic_array, window)
             out_height, out_width = mosaic_array.shape
-            outside_bbox_mask = geometry_mask(
-                [aoi_bbox_native],
-                out_shape=(out_height, out_width),
-                transform=out_transform,
-                invert=False,
-                all_touched=True,
-            )
-            valid_footprint_mask = ~outside_bbox_mask
+            if mask_outside_aoi:
+                outside_bbox_mask = geometry_mask(
+                    [aoi_bbox_native],
+                    out_shape=(out_height, out_width),
+                    transform=out_transform,
+                    invert=False,
+                    all_touched=True,
+                )
+                valid_footprint_mask = ~outside_bbox_mask
+            else:
+                # native_rect_halo: crop to the (halo-expanded) bbox but keep
+                # every real native pixel in it -- no AOI-polygon NaN-masking.
+                outside_bbox_mask = None
+                valid_footprint_mask = np.ones((out_height, out_width), dtype=bool)
         else:
             out_transform = mosaic_transform
             outside_bbox_mask = None
@@ -736,6 +751,8 @@ def _process_date_for_platform(
             "native_crs": crs.to_string(),
             "native_transform": list(out_transform_for_tags)[:6],
             "native_pixel_size_m": abs(out_transform_for_tags.a),
+            "spatial_export_mode": "aoi_clip" if mask_outside_aoi else "native_rect_halo",
+            "spatial_export_halo_m": halo_m,
         }
         if extra_tags:
             dataset_tags.update(extra_tags)
@@ -798,6 +815,11 @@ def _process_platform(
     clip_to_aoi = _as_bool(sr_cfg.get("clip_to_aoi"), default=True)
     keep_native_files = _as_bool(sr_cfg.get("keep_native_files"), default=False)
 
+    spatial_export = _normalize_spatial_export(sr_cfg.get("spatial_export"))
+    halo_m = spatial_export["halo_m"] or 0.0
+    mask_outside_aoi = spatial_export["mode"] != "native_rect_halo"
+    search_bbox = _expand_bbox_by_meters(bbox, halo_m) if halo_m > 0 else bbox
+
     file_exists_mode = str(config.get("file_exists", "skip")).strip().lower()
     if file_exists_mode not in {"overwrite", "skip"}:
         raise ValueError("config.file_exists must be 'overwrite' or 'skip'")
@@ -840,7 +862,7 @@ def _process_platform(
             lambda: _search_granules(
                 short_name=short_name,
                 version=version,
-                bbox=bbox,
+                bbox=search_bbox,
                 start_date=dates_to_process[0],
                 end_date=dates_to_process[-1],
             ),
@@ -883,6 +905,8 @@ def _process_platform(
                     aoi_geom_wgs84=geometry_wgs84,
                     file_exists_mode=file_exists_mode,
                     extra_tags=extra_tags,
+                    halo_m=halo_m,
+                    mask_outside_aoi=mask_outside_aoi,
                 )
                 summary["dates_processed"].append(result)
             except Exception as exc:
@@ -909,6 +933,38 @@ def _process_platform(
 # Public entry points
 # ---------------------------------------------------------------------------
 
+def _normalize_modis_platforms(value: Any) -> List[str]:
+    """Validate config.surface_reflectance.modis_platforms.
+
+    Unset -> MODIS_DEFAULT_PLATFORMS (["terra", "aqua"]), preserving the
+    exact pre-existing behavior (MODIS always processed both platforms
+    unconditionally) for configs that don't opt into a subset.
+    """
+    if value is None:
+        return list(MODIS_DEFAULT_PLATFORMS)
+    if isinstance(value, str):
+        platforms = [v.strip().lower() for v in value.split(",") if v.strip()]
+    elif isinstance(value, Sequence):
+        platforms = [str(v).strip().lower() for v in value if str(v).strip()]
+    else:
+        raise ValueError("config.surface_reflectance.modis_platforms must be string or list")
+
+    invalid = [p for p in platforms if p not in MODIS_ALL_PLATFORMS]
+    if invalid:
+        raise ValueError(
+            f"Unsupported MODIS platform(s) in config.surface_reflectance.modis_platforms: "
+            f"{invalid}; supported: {MODIS_ALL_PLATFORMS}"
+        )
+    if not platforms:
+        raise ValueError("config.surface_reflectance.modis_platforms must not be empty")
+
+    deduped: List[str] = []
+    for p in platforms:
+        if p not in deduped:
+            deduped.append(p)
+    return deduped
+
+
 def _process_modis_surface_reflectance(
     config: Dict[str, Any],
     config_dir: Path,
@@ -921,11 +977,13 @@ def _process_modis_surface_reflectance(
     sr_cfg = config.get("surface_reflectance", {}) or {}
     products_cfg = (sr_cfg.get("products", {}) or {}).get("modis", {}) or {}
     version = str(products_cfg.get("version", "061"))
-    terra_short_name = str(products_cfg.get("terra", "MOD09GA"))
-    aqua_short_name = str(products_cfg.get("aqua", "MYD09GA"))
+    platforms = _normalize_modis_platforms(sr_cfg.get("modis_platforms"))
+
+    default_short_names = {"terra": "MOD09GA", "aqua": "MYD09GA"}
 
     result: Dict[str, Any] = {}
-    for platform_key, short_name in (("terra", terra_short_name), ("aqua", aqua_short_name)):
+    for platform_key in platforms:
+        short_name = str(products_cfg.get(platform_key, default_short_names[platform_key]))
         LOGGER.info("Processing MODIS %s surface reflectance (%s)...", platform_key, short_name)
         result[platform_key] = _process_platform(
             config=config,

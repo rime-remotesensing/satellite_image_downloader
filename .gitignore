@@ -145,3 +145,27 @@ config.local.json
 # Ignore the irn repository folder
 result/
 *.geojson
+# 衛星の原データ・生成画像（リポジトリ外または data/ に置く）
+*.hdf
+*.h5
+*.he5
+*.nc
+*.tif
+*.tiff
+*.npz
+_debug_shape/
+_raw_views/
+
+# 研究側パス専用の一回限りのスクリプトと結果（run2.py の full-scene 方式で置換済み）
+run5_modis_native_reexport.py
+run5b_publish_and_validate.py
+run5b_publish_validate_result.json
+run7_finalize_modis_report.py
+run7_missing_modis_reexport.py
+
+# 認証情報・秘密鍵
+*.key
+*.pem
+id_rsa*
+.netrc
+_netrc

@@ -23,6 +23,8 @@ python run.py --config config/config.yaml
 | `cloudmask` | list | マスク対象の雲クラス。`1` = 厚雲、`2` = 薄雲、`3` = 影（Sentinel-2/Landsat 8-9 のみ） |
 | `snowmask` | bool | 雲マスクの後に雪マスク処理を行うか（Sentinel-2/Landsat 8-9 のみ） |
 | `activefire` | string | FIRMS 熱異常の取得レベル。`SP` / `NRT` / `none`（詳細は下記） |
+| `buffer_km` | float | AOI を上下左右に均等に拡張する距離（km）。省略 or `0` = 従来通り（詳細は下記） |
+| `burned_area` | list | 取得する月次 burned-area product。`MCD64A1` / `VNP64A1`。省略 or `[]` = 取得しない（詳細は下記） |
 
 ### Area・期間
 
@@ -39,7 +41,7 @@ startday: [20230306, 20230311, 20230410]
 endday:   [20230306, 20230311, 20230410]
 ```
 
-> **FIRMS の注意**: 複数期間を指定した場合、FIRMS は `min(startday)` から `max(endday)` の全期間を1回で取得します。
+> **FIRMS / burned-area の注意**: 複数期間を指定した場合、FIRMS と burned-area（`MCD64A1`/`VNP64A1`）は各期間ごとではなく `min(startday)` から `max(endday)` までの全期間を1回にまとめて取得します（Sentinel-2/Landsat/MODIS・VIIRS Surface Reflectance は指定した各期間ごとに個別処理されます）。
 
 ### 衛星・バンド・雲/雪マスク
 
@@ -53,6 +55,25 @@ num: []
 cloudmask: [1, 3]
 snowmask: true
 ```
+
+#### MODIS/VIIRS のプラットフォーム選択
+
+`modis` / `viirs` はそのまま書くと従来通り（MODIS = Terra+Aqua 両方、VIIRS = Suomi-NPP のみ）動作しますが、`satellite:` の各エントリに `-プラットフォーム名` を付けることで、Surface Reflectance で取得するプラットフォームを直接絞り込めます：
+
+```yaml
+satellite:
+  - modis-aqua      # Terraは取得しない
+  - viirs-noaa20    # Suomi-NPPは取得しない
+```
+
+| 衛星 | 選択可能なプラットフォーム |
+|------|--------------------------|
+| `modis` | `terra`, `aqua` |
+| `viirs` | `snpp`, `noaa20`, `noaa21` |
+
+同じ衛星を複数プラットフォーム分書くこともできます（例: `viirs-snpp`, `viirs-noaa21`）。`modis`/`viirs` を無qualifierのまま書いた場合は、それぞれの従来デフォルト（MODIS=両方、VIIRSはsnppのみ）になります。
+
+内部的には `surface_reflectance.modis_platforms` / `surface_reflectance.viirs_platforms`（下記「Internal defaults / advanced behavior」参照）と同じ仕組みで、`satellite:` 側の qualifier が指定されていればそちらが優先されます。
 
 `satellite` に `modis` / `viirs` を含めると、NASA Earthdata から daily Surface Reflectance をネイティブの Sinusoidal グリッドのまま（再投影・リサンプリング・雲マスクなし）取得します。Google Earth Engine は使用しません。FIRMS 熱異常取得（`activefire`）とは完全に独立した処理系です。詳細は下記「MODIS/VIIRS Surface Reflectance」を参照してください。
 
@@ -84,6 +105,51 @@ activefire: SP    # SP / NRT / none
 > **NOAA-21 の Standard Processing (SP) source は現時点で NASA FIRMS に存在しません**（NRT のみ提供、[FIRMS API](https://firms.modaps.eosdis.nasa.gov/api/area/) / [data availability](https://firms.modaps.eosdis.nasa.gov/api/data_availability/) で確認）。`activefire: SP` を指定した場合、NOAA-21 は明確な warning ログを出したうえでスキップされ、NRT へ自動フォールバックすることはありません。
 
 FIRMS の主出力は元の point/event data（Shapefile: 緯度経度・取得日時・confidence・FRP・scan/track 等）です。ピクセルラスタ（`activefire_tif/`）はデフォルトでは生成されません（下記参照）。
+
+---
+
+### AOI buffer (`buffer_km`)
+
+```yaml
+buffer_km: 10   # km単位。省略 or 0 = 従来通りAOIそのまま
+```
+
+元の GeoJSON の WGS84 bounding box を上下左右へ `buffer_km` km ずつ均等に拡張し、その拡張後の bbox（rectangle geometry）を download 検索・output crop の実効 AOI として使用します。内部的には既存の `src/geometry.py` の `_expand_bbox_by_meters()`（`buffer_m = buffer_km * 1000`）を再利用しています。
+
+- 省略、または `0` を指定した場合は既存の挙動と完全に一致します（bbox もオリジナルの AOI ジオメトリもそのまま使われ、rectangle への変換すら行いません）。
+- 負の値はエラー（`ValueError`）になります。
+- 反映先: Sentinel-2, Landsat 8-9, MODIS Surface Reflectance, VIIRS Surface Reflectance, burned-area (`MCD64A1`/`VNP64A1`)。
+- **FIRMS Active Fire には反映されません。** FIRMS は従来通り `firms.bbox_buffer_m`（デフォルト5000m）という別概念のバッファを使用し続けます。両者は独立しており、`buffer_km` が `firms.bbox_buffer_m` を上書き・削除することはありません。
+- 出力の summary/metadata（`run_pipeline()` の戻り値の `config` キー）には `original_bbox`（元AOIのbbox）、`effective_bbox`（拡張後のbbox）、`buffer_km` が記録されます。
+
+### Burned area (`burned_area`)
+
+```yaml
+burned_area:
+  - MCD64A1   # MODIS, 500m monthly, .061
+  - VNP64A1   # VIIRS (S-NPP), 500m monthly, .002
+```
+
+省略、または `[]` / `none` を指定した場合は burned-area の取得を一切行いません（既存挙動を完全に維持）。大文字小文字は区別しません（`mcd64a1` も可）。
+
+**重要な製品特性**: MCD64A1 / VNP64A1 は daily product ではなく、**月次(monthly)** タイルの 500m burned-area product です。各月次 granule の `Burn Date` SDS には、そのpixelが燃えた**その月内の暦日(day-of-year)** が格納されています。そのため本ツールは:
+
+1. `startday`–`endday` と重なる暦月をすべて列挙（年またぎ・閏年も正しく処理）
+2. 該当する月次 granule をそれぞれ取得
+3. 各 granule の `Burn Date`（DOY）を実際の暦日に変換
+4. `startday <= burn_date <= endday` の pixel だけを残す
+5. 全対象月の結果を union（binary OR）して1枚の期間レイヤーに統合
+
+という処理を行い、`startday`–`endday` にまたがる任意の期間を1枚の binary GeoTIFF（1=期間内に burn、0=期間内に burn なし、255=nodata/water/AOI外）として出力します。月次の中間 HDF ファイルは処理用の一時ファイルとして扱われ、`keep_native_files` と同じ思想で処理後に削除されます（最終出力として大量に残ることはありません）。
+
+MCD64A1 と VNP64A1 は別々の結果として出力され、2つを OR して1つに統合することはありません：
+
+```
+modis/burned_area/MCD64A1_YYYYMMDD_YYYYMMDD_burned.tif
+viirs/burned_area/VNP64A1_YYYYMMDD_YYYYMMDD_burned.tif
+```
+
+再投影・リサンプリングは行わず、MODIS/VIIRS 共通の 500m Sinusoidal native grid のまま処理します（複数タイルの場合は native grid 上で mosaic してから crop）。GeoTIFF タグ・JSON サイドカーには `product` / `version` / `start_date` / `end_date` / `buffer_km` / `months_used` / `tiles_used` / `source_granules` / `burned_pixel_count` / `native_crs` / `native_pixel_size_m` / `raster_reprojected=false` / `resampling=none` を記録します。
 
 ---
 
@@ -147,6 +213,8 @@ product/version・AOI クリップ・Earthdata 認証情報のパス・ネイテ
 | MODIS Terra | `MOD09GA.061` |
 | MODIS Aqua | `MYD09GA.061` |
 | VIIRS Suomi-NPP | `VNP09GA.002` |
+| VIIRS NOAA-20 (opt-in) | `VJ109GA.002` |
+| VIIRS NOAA-21 (opt-in) | `VJ209GA.002` |
 | AOI クリップ | 有効（native grid alignment は維持） |
 | Earthdata 認証情報ファイル | `./key.env` |
 | ダウンロード済み HDF/HDF5 の保持 | 無効（処理後に削除） |
@@ -162,11 +230,30 @@ surface_reflectance:
       version: "061"
     viirs:
       snpp: VNP09GA
+      noaa20: VJ109GA
+      noaa21: VJ209GA
       version: "002"
+  modis_platforms:
+    - terra
+    - aqua
+  viirs_platforms:
+    - snpp
   clip_to_aoi: true
   earthdata_env_path: ./key.env
   keep_native_files: false
 ```
+
+`modis_platforms` / `viirs_platforms` を省略した場合は従来通り（MODIS = 両方、VIIRS = `snpp` のみ）処理されます（後方互換）。**通常はこのブロックを直接書く必要はありません** — 上記「MODIS/VIIRS のプラットフォーム選択」の通り `satellite:` に `modis-aqua` / `viirs-noaa20` のように書けば同じ効果があり、`satellite:` 側の qualifier が指定されていればこちらより優先されます。この `surface_reflectance:` ブロックは `satellite:` を無qualifierのまま保ちつつ既定値だけ変えたい場合の代替手段です。VIIRS NOAA-20 (`VJ109GA.002`) / NOAA-21 (`VJ209GA.002`) は選択肢 `snpp`, `noaa20`, `noaa21` を明示的に列挙した場合のみ追加でダウンロードされます：
+
+```yaml
+surface_reflectance:
+  viirs_platforms:
+    - snpp
+    - noaa20
+    - noaa21
+```
+
+NOAA-20/21 のオンディスク SDS パス（`HDFEOS/GRIDS/VIIRS_Grid_{500m,1km}_2D/Data Fields/...`）は VNP09GA と実データで確認済みで完全に同一のため、同じマッピング（`I1`–`I3`, `M1`–`M11`, `QF1`–`QF7`, `land_water_mask`）を共有します。
 
 #### Earthdata 認証
 
@@ -187,6 +274,25 @@ surface_reflectance:
    ```
 
 Earthdata アカウントは <https://urs.earthdata.nasa.gov/> で無料登録できます。
+
+#### Spatial export mode（`spatial_export`、MODIS / VIIRS / GCOM-C 共通）
+
+```yaml
+surface_reflectance:
+  spatial_export:
+    mode: native_rect_halo   # 省略時 aoi_clip（従来通り）
+    halo_m: 16000             # 省略可（各センサの既定: MODIS/GCOM-C=0、VIIRS L2 swath=10000）
+```
+
+**背景（既知の問題）**: 従来の `aoi_clip`（省略時のデフォルト）は、経緯度の矩形 AOI を native Sinusoidal/EQA 座標系へ投影した「斜めの」ポリゴンで、native 矩形クロップの外側だけでなく、クロップ**内側**でもポリゴンの外側に出た pixel を NaN にします。実データで検証した結果、小さい AOI では**クロップ領域の50%が失われる**ケースも確認されています（元データには観測値があるにもかかわらず）。
+
+- `mode: aoi_clip`（省略時、既定）: 従来通り。`clip_to_aoi: true` のとき、AOI ポリゴンの外側を NaN 化します。
+- `mode: native_rect_halo`: AOI の bbox（+ `halo_m` で指定した分だけ拡張）で切り出した native 矩形を、ポリゴンマスクなしでそのまま保持します。元データ自体の fill/nodata 値はそのまま維持され、AOI ポリゴンの外側だからという理由で新たに NaN 化される pixel はありません。CMR 検索・タイル取得も `halo_m` 分拡張されるため、halo により隣接タイル/granule が必要になった場合も正しく取得されます。
+- VIIRS L2 swath（既定プロダクト）はそもそも AOI ポリゴンマスクを適用しない実装（native_rect_halo 相当が常定）なので、`mode` は無視され `halo_m` のみ有効です。省略時は実装側の既定 10 km halo がそのまま使われます（`0` にリセットされることはありません）。
+- GCOM-C でも同じキーが使えます（`clip_to_aoi` 相当の切替 + halo 拡張）。
+- 省略時はどのセンサも既存動作と完全に一致します。
+
+GeoTIFF タグ / JSON サイドカーには `spatial_export_mode` / `spatial_export_halo_m` が記録されます。
 
 #### 座標系・出力について
 

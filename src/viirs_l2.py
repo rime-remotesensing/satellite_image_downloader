@@ -815,8 +815,13 @@ def _date_range(a: date, b: date) -> List[date]:
 
 def process_platform_day(platform: PlatformProducts, day: date, sr_entries: List[Tuple[str, str, str]], raw_dir: Path,
                          client: Any, geometry_wgs84: Dict[str, Any], window: GridWindow, out_root: Path,
-                         file_exists_mode: str = "skip") -> Dict[str, Any]:
-    """All daytime overpasses of one platform/day -> overpass products + daily best product."""
+                         file_exists_mode: str = "skip", *, product_dir: Optional[Path] = None,
+                         write_overpass: bool = True) -> Dict[str, Any]:
+    """All daytime overpasses of one platform/day -> overpass products + daily best product.
+
+    product_dir (optional) replaces <out_root>/viirs/surface_reflectance/<platform>/l2_swath: daily products
+    go directly under it, overpass products under <product_dir>/overpass. write_overpass=False keeps the
+    overpass products in memory only (the daily product and the summary still record every overpass)."""
     tf_inv = _grid_transformer(window.grid.crs, inverse=True)
     lo, la = tf_inv.transform([window.x0, window.x1, window.x0, window.x1], [window.y0, window.y0, window.y1, window.y1])
     margin = 0.05
@@ -838,6 +843,9 @@ def process_platform_day(platform: PlatformProducts, day: date, sr_entries: List
         by_orbit.setdefault(p.sr.orbit, []).append(p)
     overpasses: List[Overpass] = []
     base = out_root / "viirs" / "surface_reflectance" / platform.key / "l2_swath"
+    daily_dir = Path(product_dir) if product_dir is not None else base / "daily"
+    overpass_dir = Path(product_dir) / "overpass" if product_dir is not None else base / "overpass"
+    summary_dir = Path(product_dir) / "summary" if product_dir is not None else base / "summary"
     for orbit, gs in sorted(by_orbit.items()):
         gs = sorted(gs, key=lambda p: p.sr.start)
         ov = build_overpass(platform.key, orbit, gs, window, box)
@@ -855,7 +863,8 @@ def process_platform_day(platform: PlatformProducts, day: date, sr_entries: List
                                "distance on the WGS84 surface (Earth-centred 3-D KD-tree, not grid-plane distance); accepted within half the "
                                "local source footprint diagonal (surface distances); bow-tie-deleted pixels excluded; same-orbit granules mosaicked in one KD-tree",
                     "description": DESCRIPTION}
-            rec["files"] = write_product(base / "overpass", stem, ov.layers, window, tags)
+            if write_overpass:
+                rec["files"] = write_product(overpass_dir, stem, ov.layers, window, tags)
             overpasses.append(ov)
         else:
             LOGGER.info("VIIRS L2 %s orbit %s on %s: AOI outside swath", platform.key, orbit, day)
@@ -869,12 +878,12 @@ def process_platform_day(platform: PlatformProducts, day: date, sr_entries: List
                 "selection_rule": "per 750 m cell: all M bands valid > lower QF1 cloud confidence > no QF2 shadow > lower sensor zenith > earlier scan; "
                                   "the 2x2 375 m cells use the same overpass; no averaging",
                 "description": "daily best observation derived from overpass products"}
-        files = write_product(base / "daily", stem, layers, window, tags, extra_prov=True)
+        files = write_product(daily_dir, stem, layers, window, tags, extra_prov=True)
         u, c = np.unique(sel[sel >= 0], return_counts=True)
         summary["daily"] = {"files": files, "selected_orbits": {str(overpasses[i].orbit): int(n) for i, n in zip(u, c)}}
     else:
         LOGGER.info("VIIRS L2 %s: no observation for AOI on %s", platform.key, day)
-    jp = base / "summary" / f"{platform.sr}_{platform.key}_{day:%Y%m%d}.json"
+    jp = summary_dir / f"{platform.sr}_{platform.key}_{day:%Y%m%d}.json"
     jp.parent.mkdir(parents=True, exist_ok=True)
     tmp = jp.with_name(jp.name + ".part")
     tmp.write_text(json.dumps(summary, indent=1, default=str), encoding="utf-8")
@@ -885,13 +894,26 @@ def process_platform_day(platform: PlatformProducts, day: date, sr_entries: List
 def _process_viirs_l2_swath(config: Dict[str, Any], config_dir: Path, output_root: Path, geometry_wgs84: Dict[str, Any],
                             bbox: Tuple[float, float, float, float], start_date: date, end_date: date,
                             *, client: Any = None) -> Dict[str, Any]:
-    from .surface_reflectance import _normalize_viirs_platforms
+    from .config import _normalize_spatial_export
+    from .surface_reflectance import _earthdata_login, _normalize_viirs_platforms
+
+    try:
+        _earthdata_login(config, config_dir)
+    except Exception as exc:
+        LOGGER.error("Earthdata authentication failed: %s", exc)
+        return {"error": str(exc)}
+
     sr_cfg = config.get("surface_reflectance", {}) or {}
     platforms = _normalize_viirs_platforms(sr_cfg.get("viirs_platforms"))
     raw_value = sr_cfg.get("viirs_l2_raw_dir") or os.environ.get("VIIRS_L2_RAW_DIR")
     raw_dir = _resolve_runtime_path(str(raw_value), config_dir) if raw_value else output_root / "viirs" / "_raw_l2"
     file_exists_mode = str(config.get("file_exists", "skip")).strip().lower()
-    window = grid_window_for_geometry(geometry_wgs84)
+    # VIIRS L2 swath never AOI-polygon-masks its output (the whole point of
+    # this product vs daily_l2g_legacy); only halo_m is meaningful here.
+    # halo_m=None (spatial_export omitted) -> grid_window_for_geometry's own
+    # unchanged hardcoded default (10 km), not silently reset to 0.
+    halo_m = _normalize_spatial_export(sr_cfg.get("spatial_export"))["halo_m"]
+    window = grid_window_for_geometry(geometry_wgs84, **({"halo_m": halo_m} if halo_m is not None else {}))
     tf_inv = _grid_transformer(window.grid.crs, inverse=True)
     lo, la = tf_inv.transform([window.x0, window.x1, window.x0, window.x1], [window.y0, window.y0, window.y1, window.y1])
     search_bbox = (min(lo), min(la), max(lo), max(la))
