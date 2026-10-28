@@ -62,7 +62,9 @@ Basic9 の指数、教師データ、AF4、patch の作成は研究側の仕事�
 
 ## 5. 取得計画（PRE/POST 対象）
 
-- 日付の正本は `config/viirs_required_dates_daily.csv` の 141 行（region × 日付）で、3 platform すべてを取得するので計 423 タスクです。範囲や統計から日付を推定することはしません。
+- 取得計画の正本は MODIS（`src/modis_plan.py` の `RUN2_DOWNLOAD_PLAN`）と同じ方式で、`src/viirs_plan.py` の `RUN3_DOWNLOAD_PLAN`（`{region: {snpp, noaa20, noaa21: [日付…]}}`）です。141 region-date を 3 platform すべてで取得するので計 423 タスクです。範囲や統計から日付を推定することはしません。
+  - 日付は `config/viirs_required_dates_daily.csv`（研究側 `viirs_burning/deep_learning/data/manifests/viirs_required_dates_daily.csv` とバイト単位で同一）からそのまま移植しました。CSV は正本ではなく照合用の記録として変更せずに残し、`tests/test_run3.py`・`tests/test_required_dates_csv.py` が Python の計画と完全一致することを確認します。
+  - `config/viirs_run3_acquisitions.json`（固定 manifest）は読み込み時に `RUN3_DOWNLOAD_PLAN` の 423 タスクと順序まで完全一致しなければエラーになります。config.yaml には依存しません。
 - 研究側との照合（2026-10-26）:
   - `viirs_burning/results/manifests/daily_pair_manifest.csv` の PRE/POST 日付 127 件（7 リージョン、3 platform、9,248 ペア）はすべて計画に含まれます。
   - 残りの 14 件は region04 で、学習では使っていません。
@@ -94,7 +96,7 @@ Basic9 の指数、教師データ、AF4、patch の作成は研究側の仕事�
 
 - overpass ごとの画像は中間生成物として既定では書き出しません（daily の provenance 層 `selected_orbit`・`scan_time_unix` と summary に、使った overpass・時刻・granule が残ります）。必要なら `--keep-overpass` で `<platform>/overpass/...` に出力します。
 - 窓は全リージョン共通で AOI bbox + 13 km（研究側 `halo_m`）、地域ごとに日付・platform によらず固定です。
-- 取得対象は既定で研究の PRE/POST に使われる 344 タスク（`config/viirs_research_required_tasks.csv`。研究側 `daily_pair_manifest.csv` 9,248 ペアの PRE/POST 日付 × platform、region04 は含まない）。`--all-plan-tasks` で計画の 423 タスク全部。
+- 取得対象は既定で研究の PRE/POST に使われる 344 タスク（`src/viirs_plan.py` の `RUN3_RESEARCH_TASKS`。照合用の記録 `config/viirs_research_required_tasks.csv` と完全一致。研究側 `daily_pair_manifest.csv` 9,248 ペアの PRE/POST 日付 × platform、region04 は含まない）。`--all-plan-tasks` で計画の 423 タスク全部。
 
 ## 8. コマンド
 

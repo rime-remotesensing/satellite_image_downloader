@@ -1,9 +1,16 @@
+"""config/viirs_required_dates_daily.csv: the record RUN3_DOWNLOAD_PLAN was moved from.
+
+It is no longer the plan (src/viirs_plan.RUN3_DOWNLOAD_PLAN is); it is kept unchanged, byte-identical to
+the research's viirs_burning/deep_learning/data/manifests/viirs_required_dates_daily.csv, to cross-check.
+"""
 from __future__ import annotations
 
 import csv
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+from src import viirs_plan
 
 CSV_PATH = Path(__file__).resolve().parents[1] / "config" / "viirs_required_dates_daily.csv"
 
@@ -65,3 +72,9 @@ def test_expected_platform_region_date_task_total_is_423():
     rows = _load_rows()
     platforms = ("snpp", "noaa20", "noaa21")
     assert len(rows) * len(platforms) == 423
+
+
+def test_csv_record_equals_the_python_plan():
+    rows = _load_rows()
+    assert [(r["region"], r["date"]) for r in rows] == [
+        (region, d) for region in sorted(viirs_plan.RUN3_DOWNLOAD_PLAN) for d in viirs_plan.RUN3_DOWNLOAD_PLAN[region]["snpp"]]

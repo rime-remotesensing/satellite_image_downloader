@@ -8,10 +8,9 @@ I bands go to the fixed 375 m and M bands / QF1-QF7 / land_water_mask to the fix
 (src/viirs_l2.py, the algorithm the research pipeline ported verbatim). This is NOT
 the old Daily L2G (VNP09GA, ~463 m / ~926 m) product.
 
-Plan (no date is inferred): config/viirs_required_dates_daily.csv x 3 platforms (423 tasks),
-frozen per task in config/viirs_run3_acquisitions.json (src/viirs_plan.py). By default only the 344
-tasks the research uses as PRE/POST (config/viirs_research_required_tasks.csv) are processed;
---all-plan-tasks takes all 423.
+Plan (no date is inferred): src/viirs_plan.RUN3_DOWNLOAD_PLAN, 141 region-dates x 3 platforms (423 tasks),
+frozen per task in config/viirs_run3_acquisitions.json. By default only the 344 tasks the research uses
+as PRE/POST (src/viirs_plan.RUN3_RESEARCH_TASKS) are processed; --all-plan-tasks takes all 423.
 
 Official extent: AOI bbox + 13 km halo on the fixed 375/750 m grid -- one window per region, independent
 of date, platform and training patches. Official layout (daily products only; per-overpass intermediates
@@ -63,7 +62,7 @@ from src.raster_compare import compare_aligned
 from src.regions import REGION_GEOJSONS
 from src.viirs_plan import (
     DEFAULT_HALO_M, DEFAULT_MANIFEST_PATH, PLATFORMS, SR_PRODUCT_BY_PLATFORM, STATUS_NO_GRANULE,
-    load_acquisition_manifest, load_required_tasks, load_research_required_tasks, validate_required_tasks,
+    load_acquisition_manifest, research_required_tasks, validate_download_plan,
 )
 
 LOGGER = logging.getLogger("run3")
@@ -411,19 +410,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--dates", nargs="+", metavar="YYYY-MM-DD", help="restrict to these plan dates")
     parser.add_argument("--all-plan-tasks", action="store_true",
                         help="all 423 plan tasks (incl. region04) instead of the research-required tasks "
-                             "(config/viirs_research_required_tasks.csv, 344)")
+                             "(src/viirs_plan.RUN3_RESEARCH_TASKS, 344)")
     parser.add_argument("--keep-overpass", action="store_true",
                         help="--reproduce: also write the per-overpass products (default: daily products only)")
     args = parser.parse_args(argv)
     mode_name = "download" if args.download else "reproduce" if args.reproduce else "verify" if args.verify else "dry_run"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    totals = validate_required_tasks(load_required_tasks())
+    totals = validate_download_plan()
     tasks = [t for t in load_acquisition_manifest(args.manifest or DEFAULT_MANIFEST_PATH)
              if (not args.regions or t.region in args.regions) and (not args.platforms or t.platform in args.platforms)
              and (not args.dates or t.date in args.dates)]
     if not args.all_plan_tasks:
-        required = load_research_required_tasks()
+        required = research_required_tasks()
         tasks = [t for t in tasks if (t.region, t.platform, t.date) in required]
     raw_root = args.raw_root or (Path(os.environ[RAW_ROOT_ENV]) if os.environ.get(RAW_ROOT_ENV) else None)
     output_root = args.output_root or (Path(os.environ[OUTPUT_ROOT_ENV]) if os.environ.get(OUTPUT_ROOT_ENV) else None)
@@ -442,7 +441,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     report: Dict[str, Any] = {
         "mode": mode_name, "plan": totals, "tasks_in_scope": len(tasks), "halo_m": args.halo_m,
-        "scope": "all_plan_tasks" if args.all_plan_tasks else "research_required (config/viirs_research_required_tasks.csv)",
+        "scope": "all_plan_tasks" if args.all_plan_tasks else "research_required (src/viirs_plan.RUN3_RESEARCH_TASKS)",
         "layout": "<output-root>/<region>/<YYYY>/surface_reflectance/<platform>/{375m,750m,qa,geometry,provenance,summary}",
         "product": "VIIRS L2 swath SR VNP09/VJ109/VJ209 collection 002 + VNP03/VJ103/VJ203 IMG/MOD geolocation",
         "raw_root": str(raw_root) if raw_root else None, "existing_roots": args.existing_root,

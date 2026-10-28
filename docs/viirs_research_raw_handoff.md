@@ -34,6 +34,7 @@ region03 noaa21 2024-04-10、region09 noaa21 2024-03-04）。
   - `region`, `platform`, `date`, `status`（`GRANULES` / `NO_GRANULE`）
   - `overpasses[]`：`orbit`、`granules`（SR ファイル名、開始時刻順）、`geolocation`（各 SR の `[IMG, MOD]`、SR の InputPointer と同じ名前）
 - 研究で使う 344 タスク：`satellite_image_downloader/config/viirs_research_required_tasks.csv`（`region,platform,date`。研究側 `daily_pair_manifest.csv` の PRE/POST × platform）
+  - downloader 側の正本は `src/viirs_plan.py` の `RUN3_RESEARCH_TASKS`（取得計画全体は `RUN3_DOWNLOAD_PLAN`）。この CSV は内容を変えずに照合用として残しており、テストで正本と完全一致することを確認しています
 - 選んだ SR だけについて、従来どおり DayNight 判定 → `pair_geolocation` → `verify_pair` → orbit ごとの mosaic → `AOI_OUTSIDE_SWATH` の除外 → 日次選択を行えば、旧保存先と同じ結果になります
   （downloader の `run3.py --reproduce` はこの方法で生成しており、attempt02 の 7 scene と画素単位で一致）
 
@@ -76,7 +77,7 @@ pipeline が原データから毎回計算し直す必要がなければ、画�
 | `Aso/VIIRS/regionXX/2024/surface_reflectance_halo/`（旧 L2G halo） | — | 同上（`viirs_burning` の L2G 系 pipeline を廃止した場合） |
 
 再生成手段は残ります。原データ（`data/viirs_l2_raw/`）、取得表（`config/viirs_run3_acquisitions.json`）、
-研究タスク一覧（`config/viirs_research_required_tasks.csv`）から、`python run3.py --reproduce --raw-root <raw> --output-root <新規>` で
+研究タスク一覧（`src/viirs_plan.py` の `RUN3_RESEARCH_TASKS`、照合用 `config/viirs_research_required_tasks.csv`）から、`python run3.py --reproduce --raw-root <raw> --output-root <新規>` で
 正式画像 344 タスクを再生成できます（`--all-plan-tasks` で 423 タスク）。
 
 ## 6. downloader 側での読み取り専用検証結果（2026-10-27、研究側コードは無変更）

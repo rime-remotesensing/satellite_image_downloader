@@ -30,7 +30,7 @@
 | 入口 | 衛星・製品 | 計画（固定 manifest） | 仕様書 |
 |---|---|---|---|
 | `run2.py` | MODIS MOD09GA/MYD09GA .061（native Sinusoidal 500 m + QC_500m + state_1km、AOI 全体 + halo） | 218 取得 / 88 granule（`config/modis_run2_acquisitions.json`、窓は `config/modis_run2_full_scene_manifest.json`） | [docs/modis_research_interface.md](docs/modis_research_interface.md) |
-| `run3.py` | VIIRS L2 swath VNP09/VJ109/VJ209 c002 → 固定 375 m / 750 m 等積 Sinusoidal grid | 141 region-date × 3 platform = 423 タスク（`config/viirs_run3_acquisitions.json`） | [docs/viirs_research_interface.md](docs/viirs_research_interface.md) |
+| `run3.py` | VIIRS L2 swath VNP09/VJ109/VJ209 c002 → 固定 375 m / 750 m 等積 Sinusoidal grid | `src/viirs_plan.py` の `RUN3_DOWNLOAD_PLAN`：141 region-date × 3 platform = 423 タスク（既定は研究の 344 タスク `RUN3_RESEARCH_TASKS`。granule は `config/viirs_run3_acquisitions.json`） | [docs/viirs_research_interface.md](docs/viirs_research_interface.md) |
 | `run4.py` | GCOM-C/SGLI L2 LAND RSRF v3002（descending、native EQA 250 m / 1 km） | 2024-02-20〜04-10 の毎日 × T0528/T0529 | [docs/sgli_research_interface.md](docs/sgli_research_interface.md) |
 | `run_activefire.py` | FIRMS Active Fire（MODIS_SP、VIIRS SNPP/NOAA-20 SP、NOAA-21 NRT） | 2024-02-08〜04-10 の連続期間 | 本ファイル冒頭の docstring |
 

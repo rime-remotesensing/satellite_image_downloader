@@ -24,20 +24,45 @@ def tasks():
 
 # --- plan ---------------------------------------------------------------------
 
-def test_required_dates_csv_is_the_141_row_authority():
-    t = viirs_plan.load_required_tasks()
-    assert viirs_plan.validate_required_tasks(t) == {"region_date_tasks": 141, "platform_region_date_tasks": 423}
-    assert set(t) == set(REGION_GEOJSONS) and "region02" not in t and "region10" not in t
+def test_python_plan_is_the_141_region_date_authority():
+    plan = viirs_plan.RUN3_DOWNLOAD_PLAN
+    assert viirs_plan.validate_download_plan() == {"region_date_tasks": 141, "platform_region_date_tasks": 423}
+    assert set(plan) == set(REGION_GEOJSONS) and "region02" not in plan and "region10" not in plan
+    assert len(viirs_plan.plan_tasks()) == 423 == len(set(viirs_plan.plan_tasks()))
+
+
+def test_python_plan_equals_the_csv_record():
+    """The literal was moved verbatim from config/viirs_required_dates_daily.csv (kept as a record)."""
+    csv_plan = viirs_plan.load_required_dates_csv()
+    assert csv_plan == {r: p["snpp"] for r, p in viirs_plan.RUN3_DOWNLOAD_PLAN.items()}
+    assert [(r, p, d) for r in sorted(csv_plan) for d in csv_plan[r] for p in viirs_plan.PLATFORMS] == viirs_plan.plan_tasks()
+
+
+def _plan_with(region, platform, dates):
+    plan = {r: {p: list(v) for p, v in ps.items()} for r, ps in viirs_plan.RUN3_DOWNLOAD_PLAN.items()}
+    plan.setdefault(region, {p: [] for p in viirs_plan.PLATFORMS})[platform] = dates
+    return plan
+
+
+@pytest.mark.parametrize("plan", [
+    _plan_with("region02", "snpp", ["2024-02-12"]),                        # forbidden region
+    _plan_with("region01", "snpp", ["2024-02-12", "2024-02-12"]),          # duplicate date
+    _plan_with("region01", "snpp", ["2024-13-01"]),                        # invalid date
+    _plan_with("region01", "noaa21", ["2024-02-12"]),                      # platforms disagree
+])
+def test_bad_plans_are_rejected(plan):
+    with pytest.raises((ValueError, AssertionError)):
+        viirs_plan.validate_download_plan(plan)
 
 
 @pytest.mark.parametrize("rows", ["region,date\nregion02,2024-02-12\n",
                                   "region,date\nregion01,2024-02-12\nregion01,2024-02-12\n",
                                   "region,date\nregion01,2024-13-01\n"])
-def test_bad_plan_rows_are_rejected(tmp_path, rows):
+def test_bad_csv_record_rows_are_rejected(tmp_path, rows):
     p = tmp_path / "plan.csv"
     p.write_text(rows, encoding="utf-8")
     with pytest.raises(ValueError):
-        viirs_plan.load_required_tasks(p)
+        viirs_plan.load_required_dates_csv(p)
 
 
 def test_frozen_manifest_matches_plan_and_products(tasks):
@@ -222,8 +247,13 @@ def test_real_task_reproduces_and_matches_research_scene(tmp_path, tasks):
         assert run3.compare_research_scene(daily, scene)["identical"]
 
 
+def test_research_tasks_equal_the_csv_record():
+    """RUN3_RESEARCH_TASKS was moved verbatim from config/viirs_research_required_tasks.csv (kept as a record)."""
+    assert viirs_plan.research_required_tasks() == viirs_plan.load_research_required_csv()
+
+
 def test_research_required_scope_and_official_layout(tasks, tmp_path):
-    req = viirs_plan.load_research_required_tasks()
+    req = viirs_plan.research_required_tasks()
     assert len(req) == 344 and {r for r, _, _ in req} == set(REGION_GEOJSONS) - {"region04"}
     by = {(t.region, t.platform, t.date): t for t in tasks}
     assert all(by[k].status == "GRANULES" for k in req)          # every research task has raw granules
