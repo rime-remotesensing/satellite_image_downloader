@@ -58,6 +58,35 @@ python run4.py --reproduce --raw-root <GCOMC_RAW_DIR> --output-root <新規dir>
 python run_activefire.py --download --output-root <AF dir>
 ```
 
+### 外部 TEST（`--scope test`）
+
+研究で評価済みの外部 TEST 3 ケース（阿蘇 region05 2023・阿蘇 region05 2025・人吉 2025）の画像を、2024 年の TRAIN/DEV と同じ生成方法で別に作れます。
+`--scope` を付けなければ従来どおり 2024 年 TRAIN/DEV です。TEST の計画は TRAIN/DEV と混ざらず、`--dry-run` の `scope` 欄で区別できます。
+
+| センサー | 計画（Python） | 固定 manifest | 取得 | 根拠 |
+|---|---|---|---|---|
+| MODIS | `src/modis_plan.py` の `RUN2_TEST_CASES` / `RUN2_TEST_PLAN` | `config/modis_run2_test_acquisitions.json`（granule・URL）、`config/modis_run2_test_full_scene_manifest.json`（窓） | 6 取得 / 10 granule：region05 2023 Terra 01-11→03-08、region05 2025 Aqua 02-14→03-22、人吉 2025 Terra 02-25→03-20 | 研究側 `external_eval.py` の CASES と既存 TEST 画像 |
+| VIIRS | `src/viirs_plan.py` の `RUN3_TEST_CASES` / `RUN3_TEST_PLAN` | `config/viirs_run3_test_acquisitions.json`（SR granule・orbit・IMG/MOD 対応） | 6 タスク（SNPP のみ）：region05 2023 01-21→03-07、region05 2025 02-27→03-22、人吉 2025 03-07→03-22 | 研究側の比較図スクリプトと既存 TEST 画像・VNP64A1/ACFR の日付 |
+
+- MODIS と VIIRS は観測日が異なる（共通は region05 2025-03-22 のみ）ので、計画はそれぞれ独立です。
+- 窓は 2024 年と同じ規則（MODIS は AOI 全体 + 10 km、VIIRS は AOI 全体 + 13 km）。region05 の窓は 2024 年の region05 と同一です。
+- 既存の TEST 画像（`Aso/MODIS|VIIRS/<region>/<2023|2025>/`）は上書きしません。新しい画像は必ず別の `--output-root` に作ります。
+- 既存の MODIS TEST 画像は AOI で切り抜いた旧方式なので、`--legacy-reference-root` で「既存画像に値がある画素」だけを transform で位置合わせして比較します。人吉の既存画像は AOI に約 18〜20 km の buffer を付けて切り抜いたもので、新しい窓（AOI + 10 km）より大きいため、はみ出す部分は比較対象外として件数だけ報告します。
+- 既存の VIIRS TEST 画像は旧 Daily L2G（VNP09GA、約 463 / 926 m）です。新しい L2 swath（VNP09、375 / 750 m）とは製品も格子も違うので、`--legacy-l2g-root` は両者の格子・範囲を並べて記録するだけで、画素一致とは判定しません。
+
+```bash
+# MODIS TEST
+python run2.py --scope test --raw-root <MODIS_RAW_HDF_ROOT> [--existing-root <既存HDFのdir>]      # 計画確認（6 取得 / 10 HDF）
+python run2.py --scope test --download --raw-root <MODIS_RAW_HDF_ROOT> [--existing-root <dir> --copy-existing]  # 不足分だけ取得
+python run2.py --scope test --reproduce --raw-root <MODIS_RAW_HDF_ROOT> --output-root <新規dir>
+python run2.py --scope test --verify --output-root <新規dir> --legacy-reference-root <Aso/MODIS>   # 既存 TEST 画像と比較
+# VIIRS TEST
+python run3.py --scope test --raw-root <VIIRS_L2_RAW_ROOT>                                        # 計画確認（6 タスク）
+python run3.py --scope test --download --raw-root <VIIRS_L2_RAW_ROOT>                             # 不足分だけ granule 名で取得
+python run3.py --scope test --reproduce --raw-root <VIIRS_L2_RAW_ROOT> --output-root <新規dir>
+python run3.py --scope test --verify --output-root <新規dir> --legacy-l2g-root <Aso/VIIRS>        # 仕様・窓の確認と旧 L2G の記述
+```
+
 ---
 
 ## セットアップ
@@ -97,7 +126,8 @@ cd satellite_image_downloader
    | ファイル | 使う入口 |
    |---|---|
    | `config/no1.geojson`, `no3`〜`no9.geojson` | run2.py（MODIS）・run3.py（VIIRS）・run4.py（SGLI）・run_activefire.py（`src/regions.py`, `src/modis_plan.py`） |
-   | `config/no2.geojson`, `no10.geojson`, `hitoyoshi.geojson` | 研究計画外の地域（必要な場合のみ） |
+   | `config/no5.geojson`, `hitoyoshi.geojson` | 外部 TEST（`--scope test`。阿蘇 region05・人吉。研究側 `Aso/PlanetScope/<region>/` の AOI と同一ファイル） |
+   | `config/no2.geojson`, `no10.geojson` | 研究計画外の地域（必要な場合のみ） |
 
 3. **認証情報を `key.env` に書く**（Git 管理外。値はコミットしない）
 
@@ -142,6 +172,27 @@ cd satellite_image_downloader
 
    `/host_data` はホストの `SATDL_HOST_DATA_PATH`（既定 `./data`）、`/gcomc_data` は `GCOMC_HOST_DATA_PATH` のマウント先です。
    各入口の詳細なオプションと出力構成は、上の表にある仕様書（`docs/*_research_interface.md`）を参照してください。
+
+7. **外部 TEST の取得・再生成・検証**（`config/no5.geojson` と `config/hitoyoshi.geojson` が必要。2024 年と同じ原データ保存先を使えます）
+
+   ```bash
+   # 2023 年 阿蘇（region05）・2025 年 阿蘇（region05）・2025 年 人吉の MODIS 6 取得（10 HDF）
+   docker compose run --rm downloader python3 run2.py --scope test --raw-root /host_data/modis_raw
+   docker compose --env-file key.env run --rm downloader python3 run2.py --scope test --download --raw-root /host_data/modis_raw
+   docker compose run --rm downloader python3 run2.py --scope test --reproduce --raw-root /host_data/modis_raw --output-root /host_data/TEST/MODIS
+   docker compose run --rm downloader python3 run2.py --scope test --verify --output-root /host_data/TEST/MODIS
+   # 地域を絞る場合：--regions region05（阿蘇 2023 + 2025）/ --regions hitoyoshi（人吉 2025）
+   # 同じ 3 ケースの VIIRS 6 タスク（SNPP、L2 swath）
+   docker compose run --rm downloader python3 run3.py --scope test --raw-root /host_data/viirs_l2_raw
+   docker compose --env-file key.env run --rm downloader python3 run3.py --scope test --download --raw-root /host_data/viirs_l2_raw
+   docker compose run --rm downloader python3 run3.py --scope test --reproduce --raw-root /host_data/viirs_l2_raw --output-root /host_data/TEST/VIIRS
+   docker compose run --rm downloader python3 run3.py --scope test --verify --output-root /host_data/TEST/VIIRS
+   # 年を絞る場合：--dates 2023-01-21 2023-03-07（VIIRS 阿蘇 2023）など。MODIS は --regions と出力の <YYYY> で区別
+   ```
+
+   既存の TEST 画像と比べる場合は、研究側の `Aso` を読み取り専用でマウントし、
+   `run2.py ... --verify --legacy-reference-root /aso/MODIS`、`run3.py ... --verify --legacy-l2g-root /aso/VIIRS` を付けます
+   （例：`docker compose run --rm -v <Aso>:/aso:ro downloader ...`）。既存画像は読むだけで、変更しません。
 
 ---
 

@@ -259,3 +259,74 @@ def test_research_required_scope_and_official_layout(tasks, tmp_path):
     assert all(by[k].status == "GRANULES" for k in req)          # every research task has raw granules
     t = by[sorted(req)[0]]
     assert run3._task_dir(tmp_path, t) == tmp_path / t.region / t.date[:4] / "surface_reflectance" / t.platform
+
+
+# --- external TEST (--scope test) -------------------------------------------------------
+
+def test_test_plan_is_the_three_snpp_cases_and_separate_from_2024():
+    assert viirs_plan.validate_test_plan() == {"test_tasks": 6}
+    test = viirs_plan.test_plan_tasks()
+    assert len(test) == 6 == len(set(test)) and {p for _, p, _ in test} == {"snpp"}
+    assert {(r, p, d) for _, r, p, pre, post in viirs_plan.RUN3_TEST_CASES for d in (pre, post)} == set(test)
+    assert not set(test) & set(viirs_plan.plan_tasks()) and {d[:4] for _, _, d in test} == {"2023", "2025"}
+    assert len(viirs_plan.plan_tasks()) == 423 and len(viirs_plan.research_required_tasks()) == 344   # unchanged
+    assert viirs_plan.region_geojson("hitoyoshi") == "config/hitoyoshi.geojson"
+    assert viirs_plan.region_geojson("region05") == REGION_GEOJSONS["region05"]
+    # each sensor keeps its own observations: only region05 2025-03-22 is shared with the MODIS TEST
+    from src import modis_plan
+    modis = {(r, d) for r, _, d in modis_plan.plan_acquisitions(scope="test")}
+    assert modis & {(r, d.replace("-", "")) for r, _, d in test} == {("region05", "20250322")}
+
+
+def test_bad_test_plans_are_rejected():
+    plan = json.loads(json.dumps(viirs_plan.RUN3_TEST_PLAN))
+    plan["hitoyoshi"]["noaa20"] = ["2025-03-07"]                       # the research used SNPP only
+    with pytest.raises(ValueError):
+        viirs_plan.validate_test_plan(plan)
+    plan = json.loads(json.dumps(viirs_plan.RUN3_TEST_PLAN))
+    plan["region05"]["snpp"] = ["2023-01-21", "2023-03-08", "2025-02-27", "2025-03-22"]   # not a case date
+    with pytest.raises(ValueError):
+        viirs_plan.validate_test_plan(plan)
+
+
+def test_test_manifest_matches_the_test_plan_and_scopes_never_cross():
+    tasks = viirs_plan.load_acquisition_manifest(scope="test")
+    assert [(t.region, t.platform, t.date) for t in tasks] == viirs_plan.test_plan_tasks()
+    for t in tasks:
+        assert t.status == "GRANULES"
+        for ov in t.overpasses:
+            for sr, (img, mod) in zip(ov.granules, ov.geolocation):
+                assert sr.startswith("VNP09.A") and ".002." in sr and img.startswith("VNP03IMG.") and mod.startswith("VNP03MOD.")
+                n, i = viirs_l2.parse_granule_name(sr), viirs_l2.parse_granule_name(img)
+                assert n.acq_date.isoformat() == t.date and i.hhmm == n.hhmm
+    with pytest.raises(ValueError):
+        viirs_plan.load_acquisition_manifest(viirs_plan.TEST_MANIFEST_PATH)          # not the 2024 plan
+    with pytest.raises(ValueError):
+        viirs_plan.load_acquisition_manifest(viirs_plan.DEFAULT_MANIFEST_PATH, scope="test")
+
+
+def test_test_scope_dry_run_and_guards(tmp_path, capsys):
+    raw = tmp_path / "raw"
+    assert run3.main(["--scope", "test", "--raw-root", str(raw)]) == 0
+    out = capsys.readouterr().out
+    assert '"tasks_in_scope": 6' in out and '"scope": "test' in out and '"MISSING_RAW": 6' in out and not raw.exists()
+    assert run3.main(["--raw-root", str(raw), "--regions", "region01"]) == 0
+    assert '"scope": "research_required' in capsys.readouterr().out                    # default unchanged
+    for bad in (["--scope", "test", "--all-plan-tasks"], ["--scope", "test", "--regions", "region01"],
+                ["--regions", "hitoyoshi"], ["--legacy-l2g-root", "x"]):
+        with pytest.raises(SystemExit):
+            run3.main(bad + ["--raw-root", str(raw)])
+
+
+def test_legacy_l2g_is_described_never_pixel_compared(tmp_path):
+    t = viirs_plan.load_acquisition_manifest(scope="test")[0]
+    files, _, _ = _write_synthetic_product(tmp_path, granule=t.overpasses[0].granules[0])
+    d = run3.describe_legacy_l2g(tmp_path / "no_legacy", t, files)
+    assert d["comparable"] is False and d["identical"] is None and "L2G" in d["reason"]
+    assert d["legacy_500m"] is None and d["new_375m"]["pixel_m"] == [375.0, 375.0]
+
+
+def test_window_check_flags_a_product_off_the_region_window(tmp_path):
+    t = viirs_plan.load_acquisition_manifest(scope="test")[0]
+    files, _, _ = _write_synthetic_product(tmp_path, granule=t.overpasses[0].granules[0])   # tiny synthetic AOI
+    assert any("halo window" in p for p in run3._window_problems(files, t, run3.DEFAULT_HALO_M))

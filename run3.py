@@ -12,6 +12,13 @@ Plan (no date is inferred): src/viirs_plan.RUN3_DOWNLOAD_PLAN, 141 region-dates 
 frozen per task in config/viirs_run3_acquisitions.json. By default only the 344 tasks the research uses
 as PRE/POST (src/viirs_plan.RUN3_RESEARCH_TASKS) are processed; --all-plan-tasks takes all 423.
 
+External TEST (--scope test): src/viirs_plan.RUN3_TEST_PLAN, the 6 SNPP PRE/POST tasks of the three
+previously evaluated external cases (region05 2023/2025, hitoyoshi 2025), frozen per task in
+config/viirs_run3_test_acquisitions.json; same L2 swath products, grid, QA and 13 km halo. The existing TEST
+images (Aso/VIIRS/<region>/<2023|2025>/surface_reflectance/snpp/, Daily L2G VNP09GA 500m/1km) are a different
+product on a different grid: --legacy-l2g-root only describes them next to the new products and never treats
+them as pixel-comparable.
+
 Official extent: AOI bbox + 13 km halo on the fixed 375/750 m grid -- one window per region, independent
 of date, platform and training patches. Official layout (daily products only; per-overpass intermediates
 are written only with --keep-overpass):
@@ -42,6 +49,9 @@ Examples:
   python run3.py --download --raw-root <VIIRS_RAW_ROOT>
   python run3.py --reproduce --raw-root <VIIRS_RAW_ROOT> --output-root <new dir>
   python run3.py --verify --output-root <dir> [--research-scenes <dataset/scenes>]
+  python run3.py --scope test --download --raw-root <VIIRS_RAW_ROOT>
+  python run3.py --scope test --reproduce --raw-root <VIIRS_RAW_ROOT> --output-root <new dir>
+  python run3.py --scope test --verify --output-root <dir> --legacy-l2g-root <Aso/VIIRS>
 """
 
 from __future__ import annotations
@@ -61,8 +71,8 @@ from typing import Any, Dict, List, Optional, Sequence
 from src.raster_compare import compare_aligned
 from src.regions import REGION_GEOJSONS
 from src.viirs_plan import (
-    DEFAULT_HALO_M, DEFAULT_MANIFEST_PATH, PLATFORMS, SR_PRODUCT_BY_PLATFORM, STATUS_NO_GRANULE,
-    load_acquisition_manifest, research_required_tasks, validate_download_plan,
+    DEFAULT_HALO_M, PLATFORMS, SCOPE_TEST, SCOPES, SR_PRODUCT_BY_PLATFORM, STATUS_NO_GRANULE, TEST_REGION_GEOJSONS,
+    load_acquisition_manifest, region_geojson, research_required_tasks, validate_download_plan, validate_test_plan,
 )
 
 LOGGER = logging.getLogger("run3")
@@ -128,7 +138,7 @@ def _is_within(child: Path, parent: Path) -> bool:
 def _region_geometry(region: str) -> Dict[str, Any]:
     from src.halo_context import load_geojson_geometry
 
-    return load_geojson_geometry(Path(__file__).resolve().parent / REGION_GEOJSONS[region])
+    return load_geojson_geometry(Path(__file__).resolve().parent / region_geojson(region))
 
 
 def _roots_for(region: str, raw_root: Optional[Path], existing: Sequence[str]) -> List[Path]:
@@ -355,7 +365,48 @@ def compare_research_scene(daily: Dict[str, Path], scene_dir: Path) -> Dict[str,
     return res
 
 
-def _verify(tasks, output_root: Path, reference_root: Optional[Path], research_scenes: Optional[Path]) -> List[Dict[str, Any]]:
+def _window_problems(files: Dict[str, Path], task, halo_m: float) -> List[str]:
+    """The product must sit exactly on the region's AOI + halo analysis window."""
+    import rasterio
+
+    from src import viirs_l2
+
+    window = viirs_l2.grid_window_for_geometry(_region_geometry(task.region), halo_m)
+    problems = []
+    for group, grid in (("375m", "375m"), ("750m", "750m")):
+        with rasterio.open(files[group]) as ds:
+            got = (round(ds.transform.c, 6), round(ds.transform.f, 6), ds.height, ds.width)
+        want = (round(window.x0, 6), round(window.y1, 6), *window.shape(grid))
+        if got != want:
+            problems.append(f"{group}: window {got} != AOI + {halo_m:g} m halo window {want}")
+    return problems
+
+
+def describe_legacy_l2g(legacy_root: Path, task, daily: Optional[Dict[str, Path]]) -> Dict[str, Any]:
+    """The existing TEST image of the same task (legacy Daily L2G VNP09GA) next to the new L2 swath product.
+
+    Different product (gridded daily L2G vs swath L2), grid (MODIS-tile Sinusoidal ~463/926 m vs fixed
+    375/750 m analysis grid) and band set, so they are never pixel-compared or declared identical."""
+    import rasterio
+
+    stem = f"VNP09GA_{task.platform}_{task.date.replace('-', '')}"
+    base = legacy_root / task.region / task.date[:4] / "surface_reflectance" / task.platform
+    out: Dict[str, Any] = {"comparable": False, "identical": None,
+                           "reason": "legacy Daily L2G VNP09GA (~463/926 m tile grid) vs L2 swath VNP09 (375/750 m analysis grid)"}
+    for label, path in (("legacy_500m", base / "500m" / f"{stem}_500m.tif"), ("legacy_1km", base / "1km" / f"{stem}_1km.tif"),
+                        ("new_375m", (daily or {}).get("375m")), ("new_750m", (daily or {}).get("750m"))):
+        if path is None or not Path(path).exists():
+            out[label] = None
+            continue
+        with rasterio.open(path) as ds:
+            out[label] = {"path": str(path), "pixel_m": [ds.transform.a, -ds.transform.e], "shape": [ds.height, ds.width],
+                          "bands": ds.count, "crs": ds.crs.to_proj4(),
+                          "bounds": [round(v, 1) for v in ds.bounds]}
+    return out
+
+
+def _verify(tasks, output_root: Path, reference_root: Optional[Path], research_scenes: Optional[Path],
+            halo_m: Optional[float] = None, legacy_l2g_root: Optional[Path] = None) -> List[Dict[str, Any]]:
     rows = []
     for t in tasks:
         row: Dict[str, Any] = {"region": t.region, "platform": t.platform, "date": t.date}
@@ -368,7 +419,13 @@ def _verify(tasks, output_root: Path, reference_root: Optional[Path], research_s
             continue
         products = _task_products(output_root, t)
         row["products"] = {k: check_product_spec(v, t) for k, v in products.items()}
+        if halo_m is not None:
+            for k, v in products.items():
+                row["products"][k] += _window_problems(v, t, halo_m)
         row["status"] = T_SPEC_OK if not any(row["products"].values()) else T_SPEC_BAD
+        if legacy_l2g_root:
+            daily = next((v for k, v in products.items() if k.startswith("daily:")), None)
+            row["legacy_l2g"] = describe_legacy_l2g(legacy_l2g_root, t, daily)
         if reference_root:
             cmp = {}
             for k, files in products.items():
@@ -405,7 +462,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="--verify: read-only research dataset/scenes dir (<region>_<platform>_<date>/scene.npz)")
     parser.add_argument("--halo-m", type=float, default=DEFAULT_HALO_M, help="analysis window halo (default: research 13000 m)")
     parser.add_argument("--manifest", type=Path, default=None)
-    parser.add_argument("--regions", nargs="+", choices=tuple(REGION_GEOJSONS))
+    parser.add_argument("--regions", nargs="+", choices=tuple(dict.fromkeys((*REGION_GEOJSONS, *TEST_REGION_GEOJSONS))))
+    parser.add_argument("--scope", choices=SCOPES, default="train_dev",
+                        help="train_dev: the 2024 plan (default); test: the external TEST plan (6 SNPP tasks)")
+    parser.add_argument("--legacy-l2g-root", type=Path, default=None,
+                        help="--verify --scope test: read-only existing TEST tree (Daily L2G); described, never pixel-compared")
     parser.add_argument("--platforms", nargs="+", choices=PLATFORMS)
     parser.add_argument("--dates", nargs="+", metavar="YYYY-MM-DD", help="restrict to these plan dates")
     parser.add_argument("--all-plan-tasks", action="store_true",
@@ -417,11 +478,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode_name = "download" if args.download else "reproduce" if args.reproduce else "verify" if args.verify else "dry_run"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    totals = validate_download_plan()
-    tasks = [t for t in load_acquisition_manifest(args.manifest or DEFAULT_MANIFEST_PATH)
+    test_scope = args.scope == SCOPE_TEST
+    if test_scope and args.all_plan_tasks:
+        parser.error("--all-plan-tasks selects the 2024 plan; --scope test always takes all 6 TEST tasks")
+    if args.legacy_l2g_root and not (test_scope and args.verify):
+        parser.error("--legacy-l2g-root is only valid with --verify --scope test")
+    valid_regions = TEST_REGION_GEOJSONS if test_scope else REGION_GEOJSONS
+    if args.regions and set(args.regions) - set(valid_regions):
+        parser.error(f"regions {sorted(set(args.regions) - set(valid_regions))} are not in the {args.scope} plan")
+    totals = validate_test_plan() if test_scope else validate_download_plan()
+    tasks = [t for t in load_acquisition_manifest(args.manifest, scope=args.scope)
              if (not args.regions or t.region in args.regions) and (not args.platforms or t.platform in args.platforms)
              and (not args.dates or t.date in args.dates)]
-    if not args.all_plan_tasks:
+    if not args.all_plan_tasks and not test_scope:
         required = research_required_tasks()
         tasks = [t for t in tasks if (t.region, t.platform, t.date) in required]
     raw_root = args.raw_root or (Path(os.environ[RAW_ROOT_ENV]) if os.environ.get(RAW_ROOT_ENV) else None)
@@ -432,7 +501,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error(f"--raw-root (or {RAW_ROOT_ENV}) or --existing-root is required; no default data root is assumed")
     if (args.reproduce or args.verify) and output_root is None:
         parser.error(f"--output-root or {OUTPUT_ROOT_ENV} is required for --{mode_name}")
-    others = [args.reference_root, args.research_scenes, raw_root] + [Path(e.split("{region}")[0]) for e in args.existing_root]
+    others = [args.reference_root, args.research_scenes, args.legacy_l2g_root, raw_root] + [Path(e.split("{region}")[0]) for e in args.existing_root]
     for other in filter(None, others):
         if output_root and (args.reproduce or args.verify) and (_is_within(output_root, other) or _is_within(other, output_root)):
             parser.error(f"output root must be separate from {other}")
@@ -441,7 +510,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     report: Dict[str, Any] = {
         "mode": mode_name, "plan": totals, "tasks_in_scope": len(tasks), "halo_m": args.halo_m,
-        "scope": "all_plan_tasks" if args.all_plan_tasks else "research_required (src/viirs_plan.RUN3_RESEARCH_TASKS)",
+        "scope": ("test (src/viirs_plan.RUN3_TEST_PLAN, external TEST)" if test_scope else
+                  "all_plan_tasks" if args.all_plan_tasks else "research_required (src/viirs_plan.RUN3_RESEARCH_TASKS)"),
         "layout": "<output-root>/<region>/<YYYY>/surface_reflectance/<platform>/{375m,750m,qa,geometry,provenance,summary}",
         "product": "VIIRS L2 swath SR VNP09/VJ109/VJ209 collection 002 + VNP03/VJ103/VJ203 IMG/MOD geolocation",
         "raw_root": str(raw_root) if raw_root else None, "existing_roots": args.existing_root,
@@ -449,7 +519,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     }
 
     if args.verify:
-        rows = _verify(tasks, output_root, args.reference_root, args.research_scenes)
+        rows = _verify(tasks, output_root, args.reference_root, args.research_scenes,
+                       args.halo_m if test_scope else None, args.legacy_l2g_root)
         report["status_counts"] = dict(Counter(r["status"] for r in rows))
         if args.reference_root:
             refd = [r["reference"] for r in rows if "reference" in r]

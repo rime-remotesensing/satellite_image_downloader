@@ -33,6 +33,10 @@ _REPO = Path(__file__).resolve().parents[1]
 # a byte copy of the full_scene_manifest.json the research side adopted.
 FROZEN_MANIFEST_PATH = _REPO / "config" / "modis_run2_full_scene_manifest.json"
 FROZEN_MANIFEST_SHA256 = "95100815ede6558b7d9454cec567d07712ae6687a9149d86d7b1db521281a861"
+# The external TEST windows (region05 2023/2025, hitoyoshi 2025): the same AOI + halo rule, frozen separately
+# (python -m src.modis_full_scene --build-test). The existing TEST images were AOI-clipped bbox crops; their
+# grids appear here as "patch_support_window" (the earlier extent), which must lie inside the new window.
+TEST_FROZEN_MANIFEST_PATH = _REPO / "config" / "modis_run2_test_full_scene_manifest.json"
 
 Window = Tuple[int, int, int, int]  # global pixel indices: row0, row1, col0, col1 (half-open)
 
@@ -82,10 +86,10 @@ def in_image(image: Window, inner: Window) -> Dict[str, int]:
 
 def full_scene_spec(spec, halo_m: Optional[float] = None):
     """(AcquisitionSpec with full-scene grids, window record) for one frozen acquisition."""
-    from .modis_plan import REGION_GEOJSONS, AcquisitionSpec
+    from .modis_plan import AcquisitionSpec, region_geojson
 
     buffer_m = halo_buffer_m_for_region(spec.region) if halo_m is None else float(halo_m)
-    halo = build_halo_context(load_geojson_geometry(_REPO / REGION_GEOJSONS[spec.region]), buffer_m)
+    halo = build_halo_context(load_geojson_geometry(_REPO / region_geojson(spec.region)), buffer_m)
     w_aoi = window_from_bounds(halo["original_native_bounds"], "500m")
     w500 = window_from_bounds(halo["halo_native_bounds"], "500m")
     w1k = to_1km(w500)
@@ -159,6 +163,14 @@ def tags_for(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def manifest_document(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {"schema": MANIFEST_SCHEMA, "acquisition_count": len(records),
+            "grid": {"crs": "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371007.181 +units=m +no_defs",
+                     "origin_x": MODIS_SINUSOIDAL_X_MIN, "origin_y": MODIS_SINUSOIDAL_Y_MAX,
+                     "pixel_500m": PX["500m"], "pixel_1km": PX["1km"]},
+            "acquisitions": records}
+
+
 def write_or_check_manifest(output_root: Path, records: List[Dict[str, Any]]) -> Path:
     """Write <output_root>/full_scene_manifest.json; if it exists, the windows must be identical (never rewritten)."""
     path = Path(output_root) / MANIFEST_NAME
@@ -173,9 +185,28 @@ def write_or_check_manifest(output_root: Path, records: List[Dict[str, Any]]) ->
             raise ValueError(f"{path} exists without {len(missing)} acquisitions; use a new output root")
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"schema": MANIFEST_SCHEMA, "acquisition_count": len(records),
-                                "grid": {"crs": "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371007.181 +units=m +no_defs",
-                                         "origin_x": MODIS_SINUSOIDAL_X_MIN, "origin_y": MODIS_SINUSOIDAL_Y_MAX,
-                                         "pixel_500m": PX["500m"], "pixel_1km": PX["1km"]},
-                                "acquisitions": records}, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps(manifest_document(records), ensure_ascii=False, indent=1), encoding="utf-8")
     return path
+
+
+def _main(argv=None) -> int:
+    import argparse
+
+    from .modis_plan import SCOPE_TEST, load_acquisition_manifest
+
+    parser = argparse.ArgumentParser(description="Maintenance: freeze the external TEST full-scene windows.")
+    parser.add_argument("--build-test", action="store_true", required=True)
+    parser.add_argument("--output", type=Path, required=True, help="manifest JSON to write (must not exist)")
+    args = parser.parse_args(argv)
+    if args.output.exists():
+        parser.error(f"refusing to overwrite {args.output}")
+    acqs, _ = load_acquisition_manifest(scope=SCOPE_TEST)
+    records = [full_scene_spec(a)[1] for a in acqs]
+    args.output.write_text(json.dumps(manifest_document(records), ensure_ascii=False, indent=1), encoding="utf-8")
+    load_frozen_full_scene(acqs, args.output)
+    print(f"wrote {args.output}: {len(records)} acquisitions")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

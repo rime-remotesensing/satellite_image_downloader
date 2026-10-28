@@ -14,6 +14,11 @@ Two layers, like src/modis_plan.py:
   002) per orbit, their exact IMG/MOD geolocation pair (from the SR InputPointer),
   or NO_GRANULE when CMR had no SR granule for that day. Built once from the
   acquisition summaries + raw archive with ``python -m src.viirs_plan --build``.
+
+The external TEST cases follow the same two layers, kept separate from the
+2024 plan: ``RUN3_TEST_CASES`` / ``RUN3_TEST_PLAN`` (6 SNPP tasks, region05
+2023/2025 + hitoyoshi 2025) and config/viirs_run3_test_acquisitions.json
+(``--acquire-test`` then ``--build --scope test``).
 """
 
 from __future__ import annotations
@@ -433,6 +438,83 @@ def plan_tasks(regions: Optional[Sequence[str]] = None) -> List[Tuple[str, str, 
     return out
 
 
+# ---------------------------------------------------------------------------
+# External TEST (never used for training or development)
+# ---------------------------------------------------------------------------
+
+SCOPE_TRAIN_DEV = "train_dev"
+SCOPE_TEST = "test"
+SCOPES = (SCOPE_TRAIN_DEV, SCOPE_TEST)
+
+TEST_REGION_GEOJSONS: Dict[str, str] = {
+    "region05": "config/no5.geojson",
+    "hitoyoshi": "config/hitoyoshi.geojson",
+}
+
+# The three previously evaluated external TEST cases (case, region, platform, PRE, POST). The research used
+# SNPP only. region05_2023 / hitoyoshi_2025: viirs_burning/scripts/final_area_comparison_maps.py; all three:
+# the existing images Aso/VIIRS/<region>/<year>/surface_reflectance/snpp/ (legacy Daily L2G VNP09GA) and their
+# VNP64A1_<PRE>_<POST> / ACFR_<PRE>_<POST> companions. Not inferred. Only region05 2025-03-22 is also a MODIS TEST date.
+RUN3_TEST_CASES: Tuple[Tuple[str, str, str, str, str], ...] = (
+    ("region05_2023", "region05", "snpp", "2023-01-21", "2023-03-07"),
+    ("region05_2025", "region05", "snpp", "2025-02-27", "2025-03-22"),
+    ("hitoyoshi_2025", "hitoyoshi", "snpp", "2025-03-07", "2025-03-22"),
+)
+
+# Do not derive this from a range: the PRE/POST dates of RUN3_TEST_CASES, in full (6 tasks).
+RUN3_TEST_PLAN: Dict[str, Dict[str, List[str]]] = {
+    "hitoyoshi": {
+        "snpp": ["2025-03-07", "2025-03-22"],
+        "noaa20": [],
+        "noaa21": [],
+    },
+    "region05": {
+        "snpp": ["2023-01-21", "2023-03-07", "2025-02-27", "2025-03-22"],
+        "noaa20": [],
+        "noaa21": [],
+    },
+}
+EXPECTED_TEST_TASKS = 6
+
+TEST_MANIFEST_PATH = Path(__file__).resolve().parents[1] / "config" / "viirs_run3_test_acquisitions.json"
+
+
+def validate_test_plan(plan: Mapping[str, Mapping[str, Sequence[str]]] = RUN3_TEST_PLAN) -> Dict[str, int]:
+    """The TEST plan must be exactly the PRE/POST dates of RUN3_TEST_CASES (6 SNPP tasks)."""
+    if set(plan) != set(TEST_REGION_GEOJSONS):
+        raise ValueError("RUN3_TEST_PLAN regions must exactly match TEST_REGION_GEOJSONS")
+    from_cases: Dict[Tuple[str, str], set] = {}
+    for _, region, platform, pre, post in RUN3_TEST_CASES:
+        from_cases.setdefault((region, platform), set()).update({pre, post})
+    total = 0
+    for region, platforms in plan.items():
+        if tuple(platforms) != PLATFORMS:
+            raise ValueError(f"RUN3_TEST_PLAN: {region} must list exactly {PLATFORMS} in that order")
+        for platform, values in platforms.items():
+            for v in values:
+                datetime.strptime(v, "%Y-%m-%d")
+            if list(values) != sorted(set(values)):
+                raise ValueError(f"RUN3_TEST_PLAN: {region}/{platform} dates must be sorted and unique")
+            if set(values) != from_cases.get((region, platform), set()):
+                raise ValueError(f"RUN3_TEST_PLAN: {region}/{platform} differs from RUN3_TEST_CASES")
+            total += len(values)
+    if total != EXPECTED_TEST_TASKS:
+        raise AssertionError(f"Expected {EXPECTED_TEST_TASKS} TEST tasks, got {total}")
+    return {"test_tasks": total}
+
+
+def test_plan_tasks(regions: Optional[Sequence[str]] = None) -> List[Tuple[str, str, str]]:
+    """(region, platform, YYYY-MM-DD) of RUN3_TEST_PLAN in a fixed order."""
+    validate_test_plan()
+    return [(r, p, d) for r in sorted(RUN3_TEST_PLAN) if not regions or r in regions
+            for p in PLATFORMS for d in RUN3_TEST_PLAN[r][p]]
+
+
+def region_geojson(region: str) -> str:
+    """AOI GeoJSON of a TRAIN/DEV or TEST region (region05 is the same file in both)."""
+    return {**REGION_GEOJSONS, **TEST_REGION_GEOJSONS}[region]
+
+
 def research_required_tasks() -> Set[Tuple[str, str, str]]:
     """(region, platform, date) of RUN3_RESEARCH_TASKS; must be 344 tasks inside the plan."""
     _check_plan_shape("RUN3_RESEARCH_TASKS", RUN3_RESEARCH_TASKS)
@@ -504,8 +586,10 @@ class Task:
         return out
 
 
-def build_manifest(acquisition_root: Path) -> Dict[str, Any]:
+def build_manifest(acquisition_root: Path, scope: str = SCOPE_TRAIN_DEV) -> Dict[str, Any]:
     """Freeze tasks from an earlier acquisition (summaries + raw archive under acquisition_root/<region>/viirs/).
+
+    scope "test" freezes RUN3_TEST_PLAN from an acquisition made with acquire_test().
 
     A day without a summary is NO_GRANULE (CMR returned no SR granule). The SR
     granules of each summary must equal the daytime SR files in that day's raw
@@ -514,7 +598,7 @@ def build_manifest(acquisition_root: Path) -> Dict[str, Any]:
     from .viirs_l2 import parse_granule_name
 
     tasks = []
-    for region, platform, d in plan_tasks():
+    for region, platform, d in (test_plan_tasks() if scope == SCOPE_TEST else plan_tasks()):
         sr = SR_PRODUCT_BY_PLATFORM[platform]
         base = Path(acquisition_root) / region / "viirs"
         summary = base / "surface_reflectance" / platform / "l2_swath" / "summary" / f"{sr}_{platform}_{d.replace('-', '')}.json"
@@ -534,16 +618,59 @@ def build_manifest(acquisition_root: Path) -> Dict[str, Any]:
                 raise ValueError(f"{g}: acquisition date is not {d}")
         tasks.append({"region": region, "platform": platform, "date": d, "status": STATUS_GRANULES, "overpasses": ovs})
     unique = {f for t in tasks for o in t["overpasses"] for g, geo in zip(o["granules"], o["geolocation"]) for f in [g, *geo]}
-    return {"schema": MANIFEST_SCHEMA, "product_collection": "002", "halo_m": DEFAULT_HALO_M,
+    data = {"schema": MANIFEST_SCHEMA, "product_collection": "002", "halo_m": DEFAULT_HALO_M,
             "task_count": len(tasks), "unique_raw_files": len(unique),
             "source": "acquisition summaries (CMR DayNightFlag=DAY, SR InputPointer geolocation pairing) + raw archive listing",
             "tasks": tasks}
+    if scope == SCOPE_TEST:
+        data["scope"] = "external TEST (RUN3_TEST_PLAN); CMR search over the AOI + 13 km halo analysis window"
+    return data
 
 
-def load_acquisition_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> List[Task]:
-    """Load and validate the frozen manifest against RUN3_DOWNLOAD_PLAN (exactly the 423 tasks)."""
+def acquire_test(acquisition_root: Path, client: Any = None, halo_m: float = DEFAULT_HALO_M) -> List[Dict[str, Any]]:
+    """Maintenance (network): find and fetch the TEST tasks' L2 swath granules the way the 2024 acquisition did.
+
+    Per task: CMR search of the SR collection over the AOI + halo analysis window (lon/lat bbox) for that
+    day, then src.viirs_l2.process_platform_day (DayNightFlag=DAY, SR InputPointer -> exact IMG/MOD pair,
+    orbit grouping, AOI status) with raw files under acquisition_root/<region>/viirs/_raw_l2/. The summaries it
+    writes are what build_manifest(scope="test") freezes. Files already present are reused, never re-fetched.
+    """
+    from datetime import date as _date
+
+    from .halo_context import load_geojson_geometry
+    from .viirs_l2 import PLATFORMS as L2_PLATFORMS
+    from .viirs_l2 import LAADSClient, _grid_transformer, grid_window_for_geometry, parse_granule_name, process_platform_day
+
+    client = client or LAADSClient()
+    repo = Path(__file__).resolve().parents[1]
+    log = []
+    for region, platform, d in test_plan_tasks():
+        p = L2_PLATFORMS[platform]
+        day = _date.fromisoformat(d)
+        geometry = load_geojson_geometry(repo / region_geojson(region))
+        window = grid_window_for_geometry(geometry, halo_m)
+        tf_inv = _grid_transformer(window.grid.crs, inverse=True)
+        lo, la = tf_inv.transform([window.x0, window.x1, window.x0, window.x1], [window.y0, window.y0, window.y1, window.y1])
+        bbox = (min(lo), min(la), max(lo), max(la))
+        entries = [e for e in client.search(p.sr_concept_id, day, day, bbox) if parse_granule_name(e[0]).acq_date == day]
+        out_root = Path(acquisition_root) / region
+        if not entries:
+            log.append({"region": region, "platform": platform, "date": d, "status": STATUS_NO_GRANULE, "search_bbox": bbox})
+            continue
+        s = process_platform_day(p, day, entries, out_root / "viirs" / "_raw_l2", client, geometry, window, out_root)
+        log.append({"region": region, "platform": platform, "date": d, "status": STATUS_GRANULES, "search_bbox": bbox,
+                    "cmr_entries": [list(e) for e in entries],
+                    "overpasses": [{k: o[k] for k in ("orbit", "granules", "geolocation", "aoi_status")} for o in s["overpasses"]]})
+    return log
+
+
+def load_acquisition_manifest(path: Optional[Path] = None, scope: str = SCOPE_TRAIN_DEV) -> List[Task]:
+    """Load and validate the frozen manifest against RUN3_DOWNLOAD_PLAN (exactly the 423 tasks), or against
+    RUN3_TEST_PLAN (the 6 TEST tasks) for scope="test"."""
     from .viirs_l2 import parse_granule_name
 
+    if path is None:
+        path = TEST_MANIFEST_PATH if scope == SCOPE_TEST else DEFAULT_MANIFEST_PATH
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if data.get("schema") != MANIFEST_SCHEMA:
         raise ValueError(f"{path}: unexpected schema {data.get('schema')!r}")
@@ -561,23 +688,39 @@ def load_acquisition_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> List[Task]:
         if (t["status"] == STATUS_NO_GRANULE) != (not ovs):
             raise ValueError(f"{path}: {t['region']}/{t['platform']}/{t['date']} status {t['status']} inconsistent")
         tasks.append(Task(t["region"], t["platform"], t["date"], t["status"], tuple(ovs)))
-    if [(t.region, t.platform, t.date) for t in tasks] != plan_tasks():
+    if scope == SCOPE_TEST:
+        if [(t.region, t.platform, t.date) for t in tasks] != test_plan_tasks():
+            raise ValueError(f"{path}: tasks do not exactly match RUN3_TEST_PLAN ({EXPECTED_TEST_TASKS})")
+    elif [(t.region, t.platform, t.date) for t in tasks] != plan_tasks():
         raise ValueError(f"{path}: tasks do not exactly match RUN3_DOWNLOAD_PLAN ({EXPECTED_PLATFORM_REGION_DATE_TASKS})")
     return tasks
 
 
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Maintenance: (re)build the frozen VIIRS acquisition manifest.")
-    parser.add_argument("--build", action="store_true", required=True)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--build", action="store_true")
+    action.add_argument("--acquire-test", action="store_true",
+                        help="network: search + fetch the TEST tasks into --acquisition-root (input of --build --scope test)")
     parser.add_argument("--acquisition-root", type=Path, required=True,
                         help="root holding <region>/viirs/{_raw_l2,surface_reflectance} of an earlier acquisition (read-only)")
-    parser.add_argument("--output", type=Path, required=True, help="manifest JSON to write (must not exist)")
+    parser.add_argument("--output", type=Path, required=True,
+                        help="manifest JSON (--build) or acquisition log (--acquire-test) to write (must not exist)")
+    parser.add_argument("--scope", choices=SCOPES, default=SCOPE_TRAIN_DEV)
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error(f"refusing to overwrite {args.output}")
-    data = build_manifest(args.acquisition_root)
+    if args.acquire_test:
+        from .surface_reflectance import _earthdata_login
+
+        _earthdata_login({}, Path.cwd())
+        log = acquire_test(args.acquisition_root)
+        args.output.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"acquired {len(log)} TEST tasks into {args.acquisition_root}; log {args.output}")
+        return 0
+    data = build_manifest(args.acquisition_root, args.scope)
     args.output.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    tasks = load_acquisition_manifest(args.output)
+    tasks = load_acquisition_manifest(args.output, args.scope)
     print(f"wrote {args.output}: {len(tasks)} tasks, {data['unique_raw_files']} unique raw files")
     return 0
 

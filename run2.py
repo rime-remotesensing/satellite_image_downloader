@@ -10,6 +10,18 @@ used by the burned-area deep-learning research (218 acquisitions = Aqua 111
 * config/modis_run2_full_scene_manifest.json the official image windows (AOI + halo; adopted
                                              2026-10-27, SHA-256 9510...a861)
 
+External TEST (--scope test; the default scope is the 2024 TRAIN/DEV plan above):
+
+* src/modis_plan.py                          RUN2_TEST_CASES / RUN2_TEST_PLAN (6 acquisitions: region05
+                                             2023 Terra + 2025 Aqua, hitoyoshi 2025 Terra; PRE/POST of the
+                                             research's external_eval.py cases)
+* config/modis_run2_test_acquisitions.json   exact source granules + URLs (from the existing TEST image sidecars)
+* config/modis_run2_test_full_scene_manifest.json  the TEST windows (same AOI + halo rule)
+
+The existing TEST images (Aso/MODIS/{region05/2023,region05/2025,hitoyoshi/2025}) are AOI-clipped bbox
+crops; --verify --scope test --legacy-reference-root <Aso/MODIS> compares them where they hold data
+(matched by transform), and never rewrites them.
+
 Official extent (default): AOI bbox + halo (10 km, region01 13 km) snapped outward to the native
 500 m grid -- one fixed window per region, independent of date, platform and training patches.
 The earlier patch-support windows (union of the TRAIN/DEV 32 x 32 patches using each file; the grids
@@ -49,6 +61,9 @@ Examples:
   python run2.py --verify --output-root <dir> --reference-root <Aso/MODIS> [--legacy-reference-root <old dir>]
   python run2.py --reproduce --legacy-patch-extent --raw-root <RAW_HDF_ROOT> --output-root <new dir>
   python run2.py --verify --legacy-patch-extent --output-root <dir> [--reference-root <old patch images>]
+  python run2.py --scope test --download --raw-root <RAW_HDF_ROOT>
+  python run2.py --scope test --reproduce --raw-root <RAW_HDF_ROOT> --output-root <new dir>
+  python run2.py --scope test --verify --output-root <dir> --legacy-reference-root <Aso/MODIS>
 """
 
 from __future__ import annotations
@@ -268,7 +283,7 @@ def _verify(acqs, output_root: Path, reference_root: Optional[Path]) -> List[Dic
 
 
 def _verify_full_scene(acqs, records, output_root: Path, reference_root: Optional[Path],
-                       legacy_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+                       legacy_root: Optional[Path] = None, legacy_aoi_clipped: bool = False) -> List[Dict[str, Any]]:
     """Official (AOI + halo) outputs: spec on the frozen grids, AOI + halo coverage; with reference_root,
     pixel and SHA-256 identity with the official images; with legacy_root, the legacy patch-extent image
     lies inside and matches over its whole extent (overlap located by transform)."""
@@ -277,7 +292,9 @@ def _verify_full_scene(acqs, records, output_root: Path, reference_root: Optiona
     from src.halo_context import HALO_PIXELS
     from src.modis_full_scene import contains, file_sha256, margins, window_from_grid
     from src.modis_native_window import Acquisition, compare_files, output_paths
-    from src.raster_compare import compare_aligned
+    from src.halo_context import load_geojson_geometry
+    from src.modis_plan import region_geojson
+    from src.raster_compare import compare_aligned, compare_aligned_masked
 
     rows = []
     for a, rec in zip(acqs, records):
@@ -315,7 +332,21 @@ def _verify_full_scene(acqs, records, output_root: Path, reference_root: Optiona
             row["official_comparison"] = cmp
             if not all(c["identical"] for c in cmp.values()):
                 problems.append("differs from the official image")
-        if legacy_root is not None:
+        if legacy_root is not None and legacy_aoi_clipped:
+            # Existing TEST images: AOI-clipped bbox crops (fill outside the clip). Compared where they hold
+            # data; an existing image larger than the new window is reported, not treated as a mismatch.
+            aoi = load_geojson_geometry(Path(__file__).resolve().parent / region_geojson(a.region))
+            old = output_paths(legacy_root, acq)
+            cmp = {}
+            for k in paths:
+                if not old[k].exists():
+                    cmp[k] = {"identical_on_b_data": False, "reference": "missing"}
+                    continue
+                cmp[k] = compare_aligned_masked(paths[k], old[k], aoi)
+            row["legacy_test_comparison"] = cmp
+            if not all(c["identical_on_b_data"] for c in cmp.values()):
+                problems.append("existing TEST image differs where it holds data")
+        elif legacy_root is not None:
             old = output_paths(legacy_root, acq)
             cmp = {}
             for k in paths:
@@ -364,6 +395,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--research-manifest", type=Path, default=None,
                         help="research MISSING_HDF_DOWNLOAD_MANIFEST.csv: restrict raw HDF scope to it (must agree)")
     parser.add_argument("--regions", nargs="+", default=None)
+    parser.add_argument("--scope", choices=("train_dev", "test"), default="train_dev",
+                        help="train_dev: the 2024 plan (218, default); test: the external TEST plan (6)")
     parser.add_argument("--legacy-patch-extent", action="store_true",
                         help="legacy windows: the training-patch support grids of config/modis_run2_acquisitions.json "
                              "(the official images before 2026-10-27)")
@@ -378,11 +411,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    from src.modis_plan import DEFAULT_MANIFEST_PATH, load_acquisition_manifest, validate_download_plan
+    from src.modis_plan import SCOPE_TEST, load_acquisition_manifest, validate_download_plan, validate_test_plan
     from src.modis_raw_hdf import DEFAULT_RECOVERED_SUBDIR, download_missing, plan_recovery, summarize
 
-    totals = validate_download_plan()
-    acqs, records = load_acquisition_manifest(args.manifest or DEFAULT_MANIFEST_PATH)
+    test_scope = args.scope == SCOPE_TEST
+    if test_scope and (args.legacy_patch_extent or args.research_manifest):
+        parser.error("--legacy-patch-extent / --research-manifest apply to the 2024 TRAIN/DEV plan, not --scope test")
+    totals = validate_test_plan() if test_scope else validate_download_plan()
+    acqs, records = load_acquisition_manifest(args.manifest, scope=args.scope)
     if args.regions:
         unknown = set(args.regions) - {a.region for a in acqs}
         if unknown:
@@ -409,16 +445,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("output root must be completely separate from the legacy reference root")
     fs_records = None
     if not args.legacy_patch_extent:
-        from src.modis_full_scene import full_scene_spec, load_frozen_full_scene, tags_for
+        from src.modis_full_scene import FROZEN_MANIFEST_PATH, TEST_FROZEN_MANIFEST_PATH, full_scene_spec, load_frozen_full_scene, tags_for
 
         if args.halo_m is None:
-            acqs, fs_records = load_frozen_full_scene(acqs)
+            acqs, fs_records = load_frozen_full_scene(acqs, TEST_FROZEN_MANIFEST_PATH if test_scope else FROZEN_MANIFEST_PATH)
         else:
             pairs = [full_scene_spec(a, args.halo_m) for a in acqs]
             acqs, fs_records = [p[0] for p in pairs], [p[1] for p in pairs]
 
     report: Dict[str, Any] = {
-        "mode": mode_name, "plan_totals": totals, "plan_acquisitions": sum(totals.values()),
+        "mode": mode_name, "scope": ("test (src/modis_plan.RUN2_TEST_PLAN, external TEST)" if test_scope
+                                     else "train_dev (src/modis_plan.RUN2_DOWNLOAD_PLAN, 2024)"),
+        "plan_totals": totals, "plan_acquisitions": sum(totals.values()),
         "acquisitions_in_scope": len(acqs), "regions": args.regions or "all",
         "raw_root": str(raw_root) if raw_root else None, "raw_hdf_dir": str(raw_root / subdir) if raw_root else None,
         "existing_roots": [str(p) for p in args.existing_root],
@@ -431,7 +469,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.verify:
         rows = (_verify(acqs, output_root, args.reference_root) if args.legacy_patch_extent
-                else _verify_full_scene(acqs, fs_records, output_root, args.reference_root, args.legacy_reference_root))
+                else _verify_full_scene(acqs, fs_records, output_root, args.reference_root, args.legacy_reference_root,
+                                        legacy_aoi_clipped=test_scope))
         report["acquisition_status_counts"] = dict(Counter(r["status"] for r in rows))
         report["acquisitions"] = rows
         path = _write_report(output_root, mode_name, report)

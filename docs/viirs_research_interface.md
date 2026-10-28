@@ -98,6 +98,16 @@ Basic9 の指数、教師データ、AF4、patch の作成は研究側の仕事�
 - 窓は全リージョン共通で AOI bbox + 13 km（研究側 `halo_m`）、地域ごとに日付・platform によらず固定です。
 - 取得対象は既定で研究の PRE/POST に使われる 344 タスク（`src/viirs_plan.py` の `RUN3_RESEARCH_TASKS`。照合用の記録 `config/viirs_research_required_tasks.csv` と完全一致。研究側 `daily_pair_manifest.csv` 9,248 ペアの PRE/POST 日付 × platform、region04 は含まない）。`--all-plan-tasks` で計画の 423 タスク全部。
 
+- 外部 TEST（`--scope test`）は別の計画です：`src/viirs_plan.py` の `RUN3_TEST_CASES` / `RUN3_TEST_PLAN`（6 タスク、SNPP のみ）。
+  region05 2023 2023-01-21→2023-03-07、region05 2025 2025-02-27→2025-03-22、人吉 2025 2025-03-07→2025-03-22。
+  根拠は研究側 `viirs_burning/scripts/final_area_comparison_maps.py`（region05 2023・人吉 2025）と、既存 TEST 画像
+  `Aso/VIIRS/<region>/<year>/surface_reflectance/snpp/` および同じ日付の `VNP64A1_<PRE>_<POST>`・`ACFR_<PRE>_<POST>` です
+  （region05 2025 の日付は研究側コードには現れず、既存画像と AF・焼失面積のファイル名だけが根拠です）。MODIS の TEST とは日付が異なり（共通は region05 2025-03-22 のみ）、計画は独立です。
+  granule・orbit・IMG/MOD は `config/viirs_run3_test_acquisitions.json` に固定しています（`python -m src.viirs_plan --acquire-test` で
+  2024 年と同じ CMR 検索・DayNightFlag・InputPointer 対応により取得し、`--build --scope test` で固定）。
+- 既存の VIIRS TEST 画像は旧 Daily L2G（VNP09GA、約 463 / 926 m のタイル格子）で、新しい L2 swath（VNP09、375 / 750 m の解析格子）とは
+  製品・格子・バンド構成が違います。`--legacy-l2g-root` は両者の格子・範囲を並べて記録するだけで、画素一致とは判定しません。
+
 ## 8. コマンド
 
 ```bash

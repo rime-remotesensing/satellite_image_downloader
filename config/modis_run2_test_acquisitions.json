@@ -1,0 +1,443 @@
+{
+ "schema": "modis-run2-acquisitions-v1",
+ "acquisition_count": 6,
+ "granule_count": 10,
+ "grid_source": "authoritative image GeoTIFFs (transform/shape) and 500m sidecar source_granules",
+ "url_source": "NASA CMR exact readable_granule_name lookup",
+ "acquisitions": [
+  {
+   "region": "hitoyoshi",
+   "platform": "terra",
+   "date": "20250225",
+   "product": "MOD09GA",
+   "granules": [
+    "MOD09GA.A2025056.h29v05.061.2025058032038.hdf"
+   ],
+   "grids": {
+    "sr": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12260181.104758056,
+      0.0,
+      -463.31271652777775,
+      3593453.429389444
+     ],
+     "shape": [
+      89,
+      196
+     ]
+    },
+    "qc_500m": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12260181.104758056,
+      0.0,
+      -463.31271652777775,
+      3593453.429389444
+     ],
+     "shape": [
+      89,
+      196
+     ]
+    },
+    "state_1km": {
+     "transform": [
+      926.6254330555555,
+      0.0,
+      12260181.104758056,
+      0.0,
+      -926.6254330555555,
+      3593453.429389444
+     ],
+     "shape": [
+      45,
+      98
+     ]
+    }
+   }
+  },
+  {
+   "region": "hitoyoshi",
+   "platform": "terra",
+   "date": "20250320",
+   "product": "MOD09GA",
+   "granules": [
+    "MOD09GA.A2025079.h29v05.061.2025081134146.hdf"
+   ],
+   "grids": {
+    "sr": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12260181.104758056,
+      0.0,
+      -463.31271652777775,
+      3593453.429389444
+     ],
+     "shape": [
+      89,
+      196
+     ]
+    },
+    "qc_500m": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12260181.104758056,
+      0.0,
+      -463.31271652777775,
+      3593453.429389444
+     ],
+     "shape": [
+      89,
+      196
+     ]
+    },
+    "state_1km": {
+     "transform": [
+      926.6254330555555,
+      0.0,
+      12260181.104758056,
+      0.0,
+      -926.6254330555555,
+      3593453.429389444
+     ],
+     "shape": [
+      45,
+      98
+     ]
+    }
+   }
+  },
+  {
+   "region": "region05",
+   "platform": "aqua",
+   "date": "20250214",
+   "product": "MYD09GA",
+   "granules": [
+    "MYD09GA.A2025045.h28v05.061.2025047031203.hdf",
+    "MYD09GA.A2025045.h29v05.061.2025047031825.hdf"
+   ],
+   "grids": {
+    "sr": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "qc_500m": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "state_1km": {
+     "transform": [
+      926.6254330555555,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -926.6254330555555,
+      3682409.4709627777
+     ],
+     "shape": [
+      21,
+      56
+     ]
+    }
+   }
+  },
+  {
+   "region": "region05",
+   "platform": "aqua",
+   "date": "20250322",
+   "product": "MYD09GA",
+   "granules": [
+    "MYD09GA.A2025081.h28v05.061.2025084210200.hdf",
+    "MYD09GA.A2025081.h29v05.061.2025084211722.hdf"
+   ],
+   "grids": {
+    "sr": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "qc_500m": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "state_1km": {
+     "transform": [
+      926.6254330555555,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -926.6254330555555,
+      3682409.4709627777
+     ],
+     "shape": [
+      21,
+      56
+     ]
+    }
+   }
+  },
+  {
+   "region": "region05",
+   "platform": "terra",
+   "date": "20230111",
+   "product": "MOD09GA",
+   "granules": [
+    "MOD09GA.A2023011.h28v05.061.2023019110240.hdf",
+    "MOD09GA.A2023011.h29v05.061.2023019171325.hdf"
+   ],
+   "grids": {
+    "sr": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "qc_500m": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "state_1km": {
+     "transform": [
+      926.6254330555555,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -926.6254330555555,
+      3682409.4709627777
+     ],
+     "shape": [
+      21,
+      56
+     ]
+    }
+   }
+  },
+  {
+   "region": "region05",
+   "platform": "terra",
+   "date": "20230308",
+   "product": "MOD09GA",
+   "granules": [
+    "MOD09GA.A2023067.h28v05.061.2023069032157.hdf",
+    "MOD09GA.A2023067.h29v05.061.2023069030431.hdf"
+   ],
+   "grids": {
+    "sr": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "qc_500m": {
+     "transform": [
+      463.31271652777775,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -463.31271652777775,
+      3681946.15824625
+     ],
+     "shape": [
+      41,
+      112
+     ]
+    },
+    "state_1km": {
+     "transform": [
+      926.6254330555555,
+      0.0,
+      12194390.699011113,
+      0.0,
+      -926.6254330555555,
+      3682409.4709627777
+     ],
+     "shape": [
+      21,
+      56
+     ]
+    }
+   }
+  }
+ ],
+ "granules": [
+  {
+   "granule_id": "MOD09GA.A2023011.h28v05.061.2023019110240.hdf",
+   "product": "MOD09GA",
+   "version": "061",
+   "tile": "h28v05",
+   "date": "2023-01-11",
+   "platform": "terra",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD09GA.061/MOD09GA.A2023011.h28v05.061.2023019110240/MOD09GA.A2023011.h28v05.061.2023019110240.hdf",
+   "cmr_size_mb": "73.9117"
+  },
+  {
+   "granule_id": "MOD09GA.A2023011.h29v05.061.2023019171325.hdf",
+   "product": "MOD09GA",
+   "version": "061",
+   "tile": "h29v05",
+   "date": "2023-01-11",
+   "platform": "terra",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD09GA.061/MOD09GA.A2023011.h29v05.061.2023019171325/MOD09GA.A2023011.h29v05.061.2023019171325.hdf",
+   "cmr_size_mb": "87.3009"
+  },
+  {
+   "granule_id": "MOD09GA.A2023067.h28v05.061.2023069032157.hdf",
+   "product": "MOD09GA",
+   "version": "061",
+   "tile": "h28v05",
+   "date": "2023-03-08",
+   "platform": "terra",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD09GA.061/MOD09GA.A2023067.h28v05.061.2023069032157/MOD09GA.A2023067.h28v05.061.2023069032157.hdf",
+   "cmr_size_mb": "65.4946"
+  },
+  {
+   "granule_id": "MOD09GA.A2023067.h29v05.061.2023069030431.hdf",
+   "product": "MOD09GA",
+   "version": "061",
+   "tile": "h29v05",
+   "date": "2023-03-08",
+   "platform": "terra",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD09GA.061/MOD09GA.A2023067.h29v05.061.2023069030431/MOD09GA.A2023067.h29v05.061.2023069030431.hdf",
+   "cmr_size_mb": "57.1748"
+  },
+  {
+   "granule_id": "MOD09GA.A2025056.h29v05.061.2025058032038.hdf",
+   "product": "MOD09GA",
+   "version": "061",
+   "tile": "h29v05",
+   "date": "2025-02-25",
+   "platform": "terra",
+   "regions": "hitoyoshi",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD09GA.061/MOD09GA.A2025056.h29v05.061.2025058032038/MOD09GA.A2025056.h29v05.061.2025058032038.hdf",
+   "cmr_size_mb": "131.18809509277344"
+  },
+  {
+   "granule_id": "MOD09GA.A2025079.h29v05.061.2025081134146.hdf",
+   "product": "MOD09GA",
+   "version": "061",
+   "tile": "h29v05",
+   "date": "2025-03-20",
+   "platform": "terra",
+   "regions": "hitoyoshi",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD09GA.061/MOD09GA.A2025079.h29v05.061.2025081134146/MOD09GA.A2025079.h29v05.061.2025081134146.hdf",
+   "cmr_size_mb": "32.038695335388184"
+  },
+  {
+   "granule_id": "MYD09GA.A2025045.h28v05.061.2025047031203.hdf",
+   "product": "MYD09GA",
+   "version": "061",
+   "tile": "h28v05",
+   "date": "2025-02-14",
+   "platform": "aqua",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MYD09GA.061/MYD09GA.A2025045.h28v05.061.2025047031203/MYD09GA.A2025045.h28v05.061.2025047031203.hdf",
+   "cmr_size_mb": "66.79687118530273"
+  },
+  {
+   "granule_id": "MYD09GA.A2025045.h29v05.061.2025047031825.hdf",
+   "product": "MYD09GA",
+   "version": "061",
+   "tile": "h29v05",
+   "date": "2025-02-14",
+   "platform": "aqua",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MYD09GA.061/MYD09GA.A2025045.h29v05.061.2025047031825/MYD09GA.A2025045.h29v05.061.2025047031825.hdf",
+   "cmr_size_mb": "75.0753173828125"
+  },
+  {
+   "granule_id": "MYD09GA.A2025081.h28v05.061.2025084210200.hdf",
+   "product": "MYD09GA",
+   "version": "061",
+   "tile": "h28v05",
+   "date": "2025-03-22",
+   "platform": "aqua",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MYD09GA.061/MYD09GA.A2025081.h28v05.061.2025084210200/MYD09GA.A2025081.h28v05.061.2025084210200.hdf",
+   "cmr_size_mb": "64.12583065032959"
+  },
+  {
+   "granule_id": "MYD09GA.A2025081.h29v05.061.2025084211722.hdf",
+   "product": "MYD09GA",
+   "version": "061",
+   "tile": "h29v05",
+   "date": "2025-03-22",
+   "platform": "aqua",
+   "regions": "region05",
+   "https_url": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MYD09GA.061/MYD09GA.A2025081.h29v05.061.2025084211722/MYD09GA.A2025081.h29v05.061.2025084211722.hdf",
+   "cmr_size_mb": "63.970197677612305"
+  }
+ ]
+}

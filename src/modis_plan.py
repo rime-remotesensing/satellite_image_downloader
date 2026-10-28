@@ -12,6 +12,11 @@ Two layers:
   images. Built once from the authoritative image sidecars with
   ``python -m src.modis_plan --build ...`` and then committed, so image
   generation does not need the reference images at all.
+
+The external TEST cases follow the same two layers, kept separate from the
+2024 plan: ``RUN2_TEST_CASES`` / ``RUN2_TEST_PLAN`` (6 acquisitions, region05
+2023/2025 + hitoyoshi 2025) and config/modis_run2_test_acquisitions.json
+(built with ``--scope test`` from the sidecars of the existing TEST images).
 """
 
 from __future__ import annotations
@@ -168,17 +173,84 @@ def validate_download_plan(plan: Mapping[str, Mapping[str, Sequence[str]]] = RUN
     return totals
 
 
-def plan_acquisitions(regions: Optional[Sequence[str]] = None) -> List[Tuple[str, str, str]]:
-    """(region, platform, YYYYMMDD) in a fixed order."""
-    validate_download_plan()
+def plan_acquisitions(regions: Optional[Sequence[str]] = None, scope: str = "train_dev") -> List[Tuple[str, str, str]]:
+    """(region, platform, YYYYMMDD) in a fixed order; scope "train_dev" (218) or "test" (6)."""
+    plan = RUN2_TEST_PLAN if scope == SCOPE_TEST else RUN2_DOWNLOAD_PLAN
+    validate_test_plan() if scope == SCOPE_TEST else validate_download_plan()
     out = []
-    for region in sorted(RUN2_DOWNLOAD_PLAN):
+    for region in sorted(plan):
         if regions and region not in regions:
             continue
         for platform in ("aqua", "terra"):
-            for d in RUN2_DOWNLOAD_PLAN[region][platform]:
+            for d in plan[region][platform]:
                 out.append((region, platform, d.replace("-", "")))
     return out
+
+
+# ---------------------------------------------------------------------------
+# External TEST (never used for training or development)
+# ---------------------------------------------------------------------------
+
+SCOPE_TRAIN_DEV = "train_dev"
+SCOPE_TEST = "test"
+SCOPES = (SCOPE_TRAIN_DEV, SCOPE_TEST)
+
+TEST_REGION_GEOJSONS: Dict[str, str] = {
+    "region05": "config/no5.geojson",
+    "hitoyoshi": "config/hitoyoshi.geojson",
+}
+
+# The three previously evaluated external TEST cases (case, region, platform, PRE, POST), verbatim from the
+# research's authoritative pairing (results/final_trainval_retraining/modis_native_residual_experiment/
+# evaluation/external_eval.py CASES; asserted again by modis_burning/scripts/g5_external_contract_preflight.py)
+# and identical to the existing images Aso/MODIS/{region05/2023,region05/2025,hitoyoshi/2025}. Not inferred.
+RUN2_TEST_CASES: Tuple[Tuple[str, str, str, str, str], ...] = (
+    ("region05_2023", "region05", "terra", "2023-01-11", "2023-03-08"),
+    ("region05_2025", "region05", "aqua", "2025-02-14", "2025-03-22"),
+    ("hitoyoshi_2025", "hitoyoshi", "terra", "2025-02-25", "2025-03-20"),
+)
+
+# Do not derive this from a range: the PRE/POST dates of RUN2_TEST_CASES, in full (6 acquisitions).
+RUN2_TEST_PLAN: Dict[str, Dict[str, List[str]]] = {
+    "hitoyoshi": {
+        "aqua": [],
+        "terra": ["2025-02-25", "2025-03-20"],
+    },
+    "region05": {
+        "aqua": ["2025-02-14", "2025-03-22"],
+        "terra": ["2023-01-11", "2023-03-08"],
+    },
+}
+
+TEST_MANIFEST_PATH = Path(__file__).resolve().parents[1] / "config" / "modis_run2_test_acquisitions.json"
+
+
+def validate_test_plan(plan: Mapping[str, Mapping[str, Sequence[str]]] = RUN2_TEST_PLAN) -> Dict[str, int]:
+    """The TEST plan must be exactly the PRE/POST dates of RUN2_TEST_CASES (aqua 2 + terra 4)."""
+    if set(plan) != set(TEST_REGION_GEOJSONS):
+        raise ValueError("RUN2_TEST_PLAN regions must exactly match TEST_REGION_GEOJSONS")
+    from_cases: Dict[Tuple[str, str], set] = {}
+    for _, region, platform, pre, post in RUN2_TEST_CASES:
+        from_cases.setdefault((region, platform), set()).update({pre, post})
+    totals = {"aqua": 0, "terra": 0}
+    for region, platforms in plan.items():
+        if set(platforms) != set(totals):
+            raise ValueError(f"{region}: test plan must contain exactly aqua and terra")
+        for platform, values in platforms.items():
+            parsed = [parse_plan_date(v) for v in values]
+            if len(parsed) != len(set(parsed)):
+                raise ValueError(f"{region}/{platform}: duplicate date in test plan")
+            if set(values) != from_cases.get((region, platform), set()):
+                raise ValueError(f"{region}/{platform}: test plan differs from RUN2_TEST_CASES")
+            totals[platform] += len(parsed)
+    if totals != {"aqua": 2, "terra": 4}:
+        raise AssertionError(f"Unexpected RUN2 TEST totals: {totals}")
+    return totals
+
+
+def region_geojson(region: str) -> str:
+    """AOI GeoJSON of a TRAIN/DEV or TEST region (region05 is the same file in both)."""
+    return {**REGION_GEOJSONS, **TEST_REGION_GEOJSONS}[region]
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +293,11 @@ def cmr_exact_lookup(granule_id: str, *, get=None) -> Dict[str, Any]:
     return {"https_url": urls[0], "cmr_size_mb": matches[0].get("granule_size")}
 
 
-def build_manifest(reference_root: Path, *, lookup=cmr_exact_lookup) -> Dict[str, Any]:
-    """Freeze granules + native grids of the 218 authoritative images (read-only)."""
+def build_manifest(reference_root: Path, *, lookup=cmr_exact_lookup, scope: str = "train_dev") -> Dict[str, Any]:
+    """Freeze granules + native grids of the authoritative images of one scope (read-only).
+
+    train_dev: the 218 official 2024 images (patch-support grids); test: the 6 existing external TEST
+    images (their AOI-clipped bbox grids), whose 500m sidecars record the exact source granules."""
     import rasterio
 
     from .modis_native_window import Acquisition, output_paths, reference_source_granules
@@ -231,7 +306,7 @@ def build_manifest(reference_root: Path, *, lookup=cmr_exact_lookup) -> Dict[str
     acquisitions = []
     regions_by_granule: Dict[str, set] = {}
     platform_by_granule: Dict[str, str] = {}
-    for region, platform, d in plan_acquisitions():
+    for region, platform, d in plan_acquisitions(scope=scope):
         acq = Acquisition(region, platform, d)
         granules = reference_source_granules(reference_root, acq)
         grids = {}
@@ -256,13 +331,15 @@ def build_manifest(reference_root: Path, *, lookup=cmr_exact_lookup) -> Dict[str
             "acquisitions": acquisitions, "granules": granules}
 
 
-def load_acquisition_manifest(path: Path = DEFAULT_MANIFEST_PATH):
-    """Load and validate the frozen manifest against RUN2_DOWNLOAD_PLAN.
+def load_acquisition_manifest(path: Optional[Path] = None, scope: str = "train_dev"):
+    """Load and validate the frozen manifest against RUN2_DOWNLOAD_PLAN (or RUN2_TEST_PLAN for scope="test").
 
     Returns (acquisitions: List[AcquisitionSpec], granules: List[GranuleRecord]).
     """
     from .modis_raw_hdf import _validate_record
 
+    if path is None:
+        path = TEST_MANIFEST_PATH if scope == SCOPE_TEST else DEFAULT_MANIFEST_PATH
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if data.get("schema") != MANIFEST_SCHEMA:
         raise ValueError(f"{path}: unexpected schema {data.get('schema')!r}")
@@ -282,8 +359,9 @@ def load_acquisition_manifest(path: Path = DEFAULT_MANIFEST_PATH):
         acqs.append(AcquisitionSpec(a["region"], a["platform"], a["date"], tuple(a["granules"]), grids))
 
     keys = [(a.region, a.platform, a.date) for a in acqs]
-    if sorted(keys) != sorted(plan_acquisitions()):
-        raise ValueError(f"{path}: acquisitions do not exactly match RUN2_DOWNLOAD_PLAN (218)")
+    if sorted(keys) != sorted(plan_acquisitions(scope=scope)):
+        plan_name = "RUN2_TEST_PLAN (6)" if scope == SCOPE_TEST else "RUN2_DOWNLOAD_PLAN (218)"
+        raise ValueError(f"{path}: acquisitions do not exactly match {plan_name}")
     return acqs, records
 
 
@@ -292,12 +370,13 @@ def _main(argv=None) -> int:
     parser.add_argument("--build", action="store_true", required=True)
     parser.add_argument("--reference-root", type=Path, required=True, help="authoritative image root (read-only)")
     parser.add_argument("--output", type=Path, required=True, help="manifest JSON to write (must not exist)")
+    parser.add_argument("--scope", choices=SCOPES, default=SCOPE_TRAIN_DEV)
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error(f"refusing to overwrite {args.output}")
-    data = build_manifest(args.reference_root)
+    data = build_manifest(args.reference_root, scope=args.scope)
     args.output.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    load_acquisition_manifest(args.output)
+    load_acquisition_manifest(args.output, scope=args.scope)
     print(f"wrote {args.output}: {data['acquisition_count']} acquisitions, {data['granule_count']} granules")
     return 0
 

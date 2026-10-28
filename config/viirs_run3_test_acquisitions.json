@@ -1,0 +1,168 @@
+{
+ "schema": "viirs-run3-acquisitions-v1",
+ "product_collection": "002",
+ "halo_m": 13000.0,
+ "task_count": 6,
+ "unique_raw_files": 24,
+ "source": "acquisition summaries (CMR DayNightFlag=DAY, SR InputPointer geolocation pairing) + raw archive listing",
+ "tasks": [
+  {
+   "region": "hitoyoshi",
+   "platform": "snpp",
+   "date": "2025-03-07",
+   "status": "GRANULES",
+   "overpasses": [
+    {
+     "orbit": 69218,
+     "granules": [
+      "VNP09.A2025066.0400.002.2025069142123.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2025066.0400.002.2025066123329.nc",
+       "VNP03MOD.A2025066.0400.002.2025066123329.nc"
+      ]
+     ],
+     "aoi_status": "OBSERVED"
+    }
+   ]
+  },
+  {
+   "region": "hitoyoshi",
+   "platform": "snpp",
+   "date": "2025-03-22",
+   "status": "GRANULES",
+   "overpasses": [
+    {
+     "orbit": 69431,
+     "granules": [
+      "VNP09.A2025081.0418.002.2025083211420.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2025081.0418.002.2025081130224.nc",
+       "VNP03MOD.A2025081.0418.002.2025081130224.nc"
+      ]
+     ],
+     "aoi_status": "OBSERVED"
+    }
+   ]
+  },
+  {
+   "region": "region05",
+   "platform": "snpp",
+   "date": "2023-01-21",
+   "status": "GRANULES",
+   "overpasses": [
+    {
+     "orbit": 58208,
+     "granules": [
+      "VNP09.A2023021.0312.002.2023097164614.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2023021.0312.002.2023021101243.nc",
+       "VNP03MOD.A2023021.0312.002.2023021101243.nc"
+      ]
+     ],
+     "aoi_status": "PARTIAL_OBSERVATION"
+    },
+    {
+     "orbit": 58209,
+     "granules": [
+      "VNP09.A2023021.0448.002.2023097171417.hdf",
+      "VNP09.A2023021.0454.002.2023097165655.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2023021.0448.002.2023021114415.nc",
+       "VNP03MOD.A2023021.0448.002.2023021114415.nc"
+      ],
+      [
+       "VNP03IMG.A2023021.0454.002.2023021114415.nc",
+       "VNP03MOD.A2023021.0454.002.2023021114415.nc"
+      ]
+     ],
+     "aoi_status": "PARTIAL_OBSERVATION"
+    }
+   ]
+  },
+  {
+   "region": "region05",
+   "platform": "snpp",
+   "date": "2023-03-07",
+   "status": "GRANULES",
+   "overpasses": [
+    {
+     "orbit": 58847,
+     "granules": [
+      "VNP09.A2023066.0406.002.2023101100749.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2023066.0406.002.2023066122928.nc",
+       "VNP03MOD.A2023066.0406.002.2023066122928.nc"
+      ]
+     ],
+     "aoi_status": "OBSERVED"
+    }
+   ]
+  },
+  {
+   "region": "region05",
+   "platform": "snpp",
+   "date": "2025-02-27",
+   "status": "GRANULES",
+   "overpasses": [
+    {
+     "orbit": 69104,
+     "granules": [
+      "VNP09.A2025058.0312.002.2025058115046.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2025058.0312.002.2025058102227.nc",
+       "VNP03MOD.A2025058.0312.002.2025058102227.nc"
+      ]
+     ],
+     "aoi_status": "PARTIAL_OBSERVATION"
+    },
+    {
+     "orbit": 69105,
+     "granules": [
+      "VNP09.A2025058.0448.002.2025058123740.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2025058.0448.002.2025058114706.nc",
+       "VNP03MOD.A2025058.0448.002.2025058114706.nc"
+      ]
+     ],
+     "aoi_status": "PARTIAL_OBSERVATION"
+    }
+   ]
+  },
+  {
+   "region": "region05",
+   "platform": "snpp",
+   "date": "2025-03-22",
+   "status": "GRANULES",
+   "overpasses": [
+    {
+     "orbit": 69431,
+     "granules": [
+      "VNP09.A2025081.0418.002.2025083211420.hdf"
+     ],
+     "geolocation": [
+      [
+       "VNP03IMG.A2025081.0418.002.2025081130224.nc",
+       "VNP03MOD.A2025081.0418.002.2025081130224.nc"
+      ]
+     ],
+     "aoi_status": "OBSERVED"
+    }
+   ]
+  }
+ ],
+ "scope": "external TEST (RUN3_TEST_PLAN); CMR search over the AOI + 13 km halo analysis window"
+}

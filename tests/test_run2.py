@@ -372,3 +372,97 @@ def test_full_scene_manifest_is_never_rewritten_with_other_windows(tmp_path, fro
     with pytest.raises(ValueError):
         fs.write_or_check_manifest(tmp_path, [fs.full_scene_spec(a, 20_000.0)[1] for a in frozen[0][:2]])
     assert p.read_bytes() == before
+
+
+# --- external TEST (--scope test) -------------------------------------------------------
+
+def test_test_plan_is_the_three_external_cases_and_separate_from_2024():
+    assert modis_plan.validate_test_plan() == {"aqua": 2, "terra": 4}
+    test = modis_plan.plan_acquisitions(scope="test")
+    assert len(test) == 6 == len(set(test))
+    assert {(r, p, d) for _, r, p, pre, post in modis_plan.RUN2_TEST_CASES for d in (pre, post)} == \
+        {(r, p, f"{d[:4]}-{d[4:6]}-{d[6:]}") for r, p, d in test}
+    assert not set(test) & set(modis_plan.plan_acquisitions())                          # never mixed with TRAIN/DEV
+    assert {d[:4] for _, _, d in test} == {"2023", "2025"}
+    assert len(modis_plan.plan_acquisitions()) == 218                                   # 2024 plan unchanged
+    for region, rel in modis_plan.TEST_REGION_GEOJSONS.items():
+        assert modis_plan.region_geojson(region) == rel
+    assert modis_plan.region_geojson("region05") == modis_plan.REGION_GEOJSONS["region05"]
+
+
+def test_bad_test_plans_are_rejected():
+    plan = json.loads(json.dumps(modis_plan.RUN2_TEST_PLAN))
+    plan["region05"]["terra"].append("2023-01-12")                                       # not a case date
+    with pytest.raises(ValueError):
+        modis_plan.validate_test_plan(plan)
+    plan = json.loads(json.dumps(modis_plan.RUN2_TEST_PLAN))
+    plan["hitoyoshi"]["aqua"] = ["2025-02-25"]                                           # wrong platform
+    with pytest.raises(ValueError):
+        modis_plan.validate_test_plan(plan)
+
+
+def test_test_manifest_has_the_existing_test_granules_with_exact_urls():
+    acqs, records = modis_plan.load_acquisition_manifest(scope="test")
+    assert sorted((a.region, a.platform, a.date) for a in acqs) == sorted(modis_plan.plan_acquisitions(scope="test"))
+    assert len(records) == 10
+    for r in records:
+        assert r.version == "061" and r.product == modis_plan.PRODUCT_BY_PLATFORM[r.platform]
+        assert r.https_url.endswith("/" + r.granule_id) and r.granule_id.split(".")[2] in {"h28v05", "h29v05"}
+    by = {(a.region, a.date): a.granules for a in acqs}
+    assert all(g.split(".")[2] == "h29v05" for g in by[("hitoyoshi", "20250225")])     # hitoyoshi: one tile
+    with pytest.raises(ValueError):                                                     # scopes never cross
+        modis_plan.load_acquisition_manifest(modis_plan.TEST_MANIFEST_PATH)
+
+
+def test_test_windows_follow_the_official_rule_and_region05_equals_2024(frozen):
+    from src import modis_full_scene as fs
+
+    acqs, _ = modis_plan.load_acquisition_manifest(scope="test")
+    specs, records = fs.load_frozen_full_scene(acqs, fs.TEST_FROZEN_MANIFEST_PATH)
+    for a, spec, rec in zip(acqs, specs, records):
+        computed, crec = fs.full_scene_spec(a)
+        assert spec.grids == computed.grids and rec == json.loads(json.dumps(crec))
+        assert rec["halo_m_requested"] == 10_000.0 and rec["halo_achieved_px_min"] >= halo_context.HALO_PIXELS
+        # the existing TEST image (AOI-clipped bbox) lies inside for region05; hitoyoshi's buffered crop is larger
+        assert rec["patch_support_window"]["contained"] == (a.region == "region05")
+    _, official = fs.load_frozen_full_scene(frozen[0])
+    w2024 = {json.dumps(r["grids"], sort_keys=True) for r in official if r["region"] == "region05"}
+    wtest = {json.dumps(r["grids"], sort_keys=True) for r in records if r["region"] == "region05"}
+    assert w2024 == wtest and len(wtest) == 1
+
+
+def test_test_scope_dry_run_and_guards(tmp_path, capsys, fake_verify):
+    raw = tmp_path / "raw"
+    assert run2.main(["--scope", "test", "--raw-root", str(raw)]) == 0
+    s = _summary(capsys.readouterr().out)
+    assert s["scope"].startswith("test") and s["plan_acquisitions"] == 6 and s["acquisitions_in_scope"] == 6
+    assert s["acquisition_status_counts"] == {"BLOCKED_MISSING_HDF": 6} and len(s["missing_hdf"]) == 10
+    assert not raw.exists()
+    assert run2.main(["--raw-root", str(raw), "--regions", "region01"]) == 0
+    assert _summary(capsys.readouterr().out)["scope"].startswith("train_dev")             # default unchanged
+    with pytest.raises(SystemExit):
+        run2.main(["--scope", "test", "--legacy-patch-extent", "--raw-root", str(raw)])
+    with pytest.raises(SystemExit):
+        run2.main(["--scope", "test", "--regions", "region01", "--raw-root", str(raw)])  # not a TEST region
+
+
+def test_masked_comparison_counts_clipped_pixels_and_catches_changes(tmp_path):
+    from src.raster_compare import compare_aligned_masked
+
+    crs = CRS.from_proj4(MODIS_SINUSOIDAL_PROJ4)
+    big = np.arange(1, 1 + 2 * 6 * 8, dtype=np.float32).reshape(2, 6, 8)
+    small = big[:, 1:5, 2:6].copy()
+    small[:, 0, :] = np.nan                                            # removed by an AOI clip
+    for name, arr, t in (("a", big, from_origin(0, 600, 100, 100)), ("b", small, from_origin(200, 500, 100, 100))):
+        with rasterio.open(tmp_path / f"{name}.tif", "w", driver="GTiff", width=arr.shape[2], height=arr.shape[1], count=2,
+                           dtype="float32", crs=crs, transform=t, nodata=float("nan")) as ds:
+            ds.write(arr)
+    c = compare_aligned_masked(tmp_path / "a.tif", tmp_path / "b.tif")
+    assert c["b_fully_inside_a"] and c["b_offset_in_a"] == {"row": 1, "col": 2}
+    assert c["b_data_values_compared"] == 2 * 3 * 4 and c["b_fill_values_in_overlap"] == 2 * 4
+    assert c["b_data_mismatch_values"] == 0 and c["identical_on_b_data"]
+    small[0, 2, 1] += 1
+    with rasterio.open(tmp_path / "b.tif", "r+") as ds:
+        ds.write(small)
+    c = compare_aligned_masked(tmp_path / "a.tif", tmp_path / "b.tif")
+    assert c["b_data_mismatch_values"] == 1 and not c["identical_on_b_data"]

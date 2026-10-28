@@ -151,3 +151,22 @@ manifest の再生成（保守用、通常不要）：`python -m src.modis_plan 
 **画素の対応付けは必ず transform で行ってください。** 画像左上からの相対位置は窓が変われば変わります。
 画素 (row, col) の中心は x = c + (col + 0.5)·a、y = f + (row + 0.5)·e です。全球 MODIS Sinusoidal 500 m 格子での位置は
 col_g = (x0 − (−20015109.354)) / 463.3127…、row_g = (10007554.677 − y0) / 463.3127… で、タグ `global_pixel_origin_500m` と manifest に記録しています。
+
+## 12. 外部 TEST（`--scope test`）
+
+2024 年 TRAIN/DEV の計画（`RUN2_DOWNLOAD_PLAN` 218 取得）とは別に、研究で評価済みの外部 TEST 3 ケースを同じ方法で生成します。
+
+| 項目 | 内容 |
+|---|---|
+| 計画の正本 | `src/modis_plan.py` の `RUN2_TEST_CASES`（ケース・PRE・POST）と `RUN2_TEST_PLAN`（`{region: {aqua, terra: [日付]}}`、6 取得 = Aqua 2 + Terra 4） |
+| ケース | region05 2023 Terra 2023-01-11→2023-03-08、region05 2025 Aqua 2025-02-14→2025-03-22、人吉 2025 Terra 2025-02-25→2025-03-20 |
+| 根拠 | 研究側 `results/final_trainval_retraining/modis_native_residual_experiment/evaluation/external_eval.py` の CASES（`modis_burning/scripts/g5_external_contract_preflight.py` でも同じ組を確認）と既存 TEST 画像 `Aso/MODIS/{region05/2023,region05/2025,hitoyoshi/2025}` |
+| granule・URL | `config/modis_run2_test_acquisitions.json`（既存 TEST 画像の sidecar `source_granules` から作成し、CMR で完全一致する URL を固定。10 granule、人吉は h29v05 のみ） |
+| 窓 | `config/modis_run2_test_full_scene_manifest.json`。2024 年と同じ規則（AOI 全体 + 10 km halo）。region05 の窓は 2024 年の region05 と同一 |
+| AOI | region05 = `config/no5.geojson`、人吉 = `config/hitoyoshi.geojson`（研究側 `Aso/PlanetScope/<region>/` と同一ファイル） |
+
+既存の TEST 画像との関係：
+
+- 既存 `Aso/MODIS/<region>/<2023|2025>/` は旧方式（`clip_to_aoi`、最小 bbox で切り抜き、AOI 外は NaN / fill）です。`--verify --scope test --legacy-reference-root <Aso/MODIS>` は transform で位置を合わせ、既存画像に値がある画素だけを比べます（`legacy_test_comparison`）。
+- 人吉の既存画像は AOI に約 18〜20 km の buffer を付けて切り抜いたもので（89 × 196 px）、新しい窓（55 × 120 px）より大きいため、新しい窓の外の値は「比較範囲外」として件数だけ記録します。
+- 研究側の Halo v2 再出力（`results/modis_test_halo_v2_reevaluation_20261017/data/`、AOI マスクなし、学習パッチ範囲）とも、重なり部分は NaN を含めて完全一致することを確認しています。人吉の Halo v2（90 × 196）は新しい窓を含む大きさなので、旧パッチ範囲のまま推論する場合は Halo v2 か、`--halo-m` による正式外の広い窓が必要です。
