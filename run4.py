@@ -54,7 +54,7 @@ LOGGER = logging.getLogger("run4")
 RAW_ROOT_ENV = "GCOMC_RAW_DIR"
 OUTPUT_ROOT_ENV = "GCOMC_OUTPUT_ROOT"
 REPORT_DIR = "_run4_reports"
-PERIOD_START = "2024-02-20"
+PERIOD_START = "2024-02-01"
 PERIOD_END = "2024-04-10"
 # Same native context as the research VIIRS input (13 km); never AOI-polygon-masked.
 DEFAULT_HALO_M = 13_000.0
